@@ -1,0 +1,44 @@
+clipboard-sync
+Copyright 2024 clipboard-sync Authors
+
+This project includes software developed by the following third parties:
+
+Eclipse Paho MQTT Client
+Copyright (c) 2013-2024 Eclipse Foundation
+Licensed under the Eclipse Public License 2.0
+See: https://github.com/eclipse/paho.mqtt.golang
+
+golang.design/x/clipboard
+Copyright (c) 2019 The golang.design Initiative Authors
+Licensed under the MIT License
+See: https://github.com/golang-design/clipboard
+
+golang.org/x/sys
+Copyright (c) 2009-2024 The Go Authors
+Licensed under the BSD 3-Clause License
+See: https://github.com/golang/sys
+
+golang.org/x/exp
+Copyright (c) 2017-2024 The Go Authors
+Licensed under the BSD 3-Clause License
+
+golang.org/x/image
+Copyright (c) 2011-2024 The Go Authors
+Licensed under the BSD 3-Clause License
+
+golang.org/x/mobile
+Copyright (c) 2013-2024 The Go Authors
+Licensed under the BSD 3-Clause License
+
+golang.org/x/net
+Copyright (c) 2009-2024 The Go Authors
+Licensed under the BSD 3-Clause License
+
+golang.org/x/sync
+Copyright (c) 2017-2024 The Go Authors
+Licensed under the BSD 3-Clause License
+
+gorilla/websocket
+Copyright (c) 2013-2024 The GorillaWebSocket Authors
+Licensed under the BSD 2-Clause License
+See: https://github.com/gorilla/websocket
