@@ -30,7 +30,7 @@ cd "$SCRIPT_DIR"
 # Clean before build
 go clean
 
-BUILD_TIME=$(date '+%Y-%m-%dT%H:%M:%S%z')
+BUILD_TIME=$(date '+%Y-%m-%dT%H:%M:%S%z' | tr -d ' ')
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 GIT_COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
 
