@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +31,11 @@ import (
 var (
 	isWayland = os.Getenv("XDG_SESSION_TYPE") == "wayland"
 	isX11     = os.Getenv("XDG_SESSION_TYPE") == "x11" || os.Getenv("DISPLAY") != ""
+)
+
+const (
+	defaultMaxRuntime = 3600 // 默认最大运行时间（秒）
+	envMaxRuntime     = "CLIPBOARD_MAX_RUNTIME"
 )
 
 func initClipboard() {
@@ -40,6 +46,20 @@ func initClipboard() {
 	} else {
 		log.Println("Linux剪贴板初始化 (未知环境，默认X11)")
 	}
+}
+
+// getMaxRuntime 读取最大运行时间配置
+func getMaxRuntime() time.Duration {
+	val := os.Getenv(envMaxRuntime)
+	if val == "" {
+		return time.Duration(defaultMaxRuntime) * time.Second
+	}
+	seconds, err := strconv.Atoi(val)
+	if err != nil || seconds <= 0 {
+		log.Printf("[WARN] 无效的 %s 值 '%s'，使用默认值 %ds", envMaxRuntime, val, defaultMaxRuntime)
+		return time.Duration(defaultMaxRuntime) * time.Second
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // DetectClipboardMime 检测当前剪贴板的MIME类型
@@ -74,12 +94,61 @@ func SetClipboardContentImage(image []byte) error {
 	return setClipboardImageX11(image)
 }
 
-// ListenClipboardChanges 监听剪贴板返回
+// ListenClipboardChanges 监听剪贴板变化，包含自动重启机制
 func ListenClipboardChanges() <-chan ClipboardChange {
+	changes := make(chan ClipboardChange)
+	go func() {
+		defer close(changes)
+
+		maxRuntime := getMaxRuntime()
+		backoff := 3 * time.Second
+		const maxBackoff = 60 * time.Second
+
+		for {
+			errCh := startClipboardMonitorPipe(changes)
+			timer := time.NewTimer(maxRuntime)
+
+			select {
+			case err := <-errCh:
+				timer.Stop()
+				if err != nil {
+					log.Printf("[CLIPBOARD] 监听进程异常退出: %v，%v 后重启...", err, backoff)
+				} else {
+					log.Printf("[CLIPBOARD] 监听进程退出，%v 后重启...", backoff)
+				}
+			case <-timer.C:
+				log.Printf("[CLIPBOARD] 达到最大运行时间 (%v)，重启监听...", maxRuntime)
+				backoff = 3 * time.Second // 正常重启重置退避
+				continue
+			case <-stopCh:
+				timer.Stop()
+				return
+			}
+
+			select {
+			case <-time.After(backoff):
+			case <-stopCh:
+				return
+			}
+
+			// 指数退避
+			if backoff < maxBackoff {
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+		}
+	}()
+	return changes
+}
+
+// startClipboardMonitorPipe 启动平台相关的剪贴板监听管道
+func startClipboardMonitorPipe(changes chan<- ClipboardChange) <-chan error {
 	if isWayland {
-		return listenClipboardChangesWayland()
+		return listenClipboardChangesWaylandPipe(changes)
 	}
-	return listenClipboardChangesX11()
+	return listenClipboardChangesX11Pipe(changes)
 }
 
 // ==================== Wayland 实现 ====================
@@ -120,6 +189,7 @@ func readClipboardContentWayland(mime string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	cmd.Wait()
 	output = removeTrailingNewline(output)
 	return output, nil
 }
@@ -148,25 +218,27 @@ func setClipboardImageWayland(image []byte) error {
 	return cmd.Run()
 }
 
-func listenClipboardChangesWayland() <-chan ClipboardChange {
-	changes := make(chan ClipboardChange)
+// listenClipboardChangesWaylandPipe 启动 wl-paste 监听，通过 error channel 报告异常
+func listenClipboardChangesWaylandPipe(changes chan<- ClipboardChange) <-chan error {
+	errCh := make(chan error, 1)
 
 	cmd := exec.Command("wl-paste", "-w", "date", "+%s")
-
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Fatal(err)
+		errCh <- fmt.Errorf("创建 wl-paste 管道失败: %w", err)
+		return errCh
 	}
 
-	err = cmd.Start()
-	if err != nil {
-		log.Fatal(err)
+	if err := cmd.Start(); err != nil {
+		errCh <- fmt.Errorf("启动 wl-paste 失败: %w", err)
+		return errCh
 	}
 
 	go func() {
-		defer close(changes)
-		defer cmd.Wait()
-		defer cmd.Process.Kill()
+		defer func() {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}()
 
 		scanner := bufio.NewScanner(stdout)
 		loop := -1
@@ -181,16 +253,27 @@ func listenClipboardChangesWayland() <-chan ClipboardChange {
 			debugLog("剪贴板变更 (Wayland) - MIME: %s, 内容: %s", mime, debugFormatContent(content))
 			var ts int64
 			fmt.Sscanf(timestamp, "%d", &ts)
-			changes <- ClipboardChange{
+			select {
+			case changes <- ClipboardChange{
 				Timestamp: ts,
 				Mime:      mime,
 				Content:   content,
+			}:
+			case <-stopCh:
+				errCh <- nil
+				return
 			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			errCh <- fmt.Errorf("wl-paste 管道错误: %w", err)
+		} else {
+			errCh <- fmt.Errorf("wl-paste 进程退出 (EOF)")
 		}
 	}()
 
-	log.Print("开始通过wl-paste监听剪贴板 (Wayland)")
-	return changes
+	log.Print("[CLIPBOARD] 开始通过 wl-paste 监听剪贴板 (Wayland)")
+	return errCh
 }
 
 // ==================== X11 实现 ====================
@@ -259,25 +342,27 @@ func setClipboardImageX11(image []byte) error {
 	return cmd.Run()
 }
 
-func listenClipboardChangesX11() <-chan ClipboardChange {
-	changes := make(chan ClipboardChange)
+// listenClipboardChangesX11Pipe 启动 xsel 监听，通过 error channel 报告异常
+func listenClipboardChangesX11Pipe(changes chan<- ClipboardChange) <-chan error {
+	errCh := make(chan error, 1)
 
 	cmd := exec.Command("xsel", "--clipboard", "--watch")
-
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Fatal(err)
+		errCh <- fmt.Errorf("创建 xsel 管道失败: %w", err)
+		return errCh
 	}
 
-	err = cmd.Start()
-	if err != nil {
-		log.Fatal(err)
+	if err := cmd.Start(); err != nil {
+		errCh <- fmt.Errorf("启动 xsel 失败: %w", err)
+		return errCh
 	}
 
 	go func() {
-		defer close(changes)
-		defer cmd.Wait()
-		defer cmd.Process.Kill()
+		defer func() {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}()
 
 		scanner := bufio.NewScanner(stdout)
 		loop := -1
@@ -289,16 +374,27 @@ func listenClipboardChangesX11() <-chan ClipboardChange {
 			mime := detectClipboardMimeX11()
 			content, _ := readClipboardContentX11(mime)
 			debugLog("剪贴板变更 (X11) - MIME: %s, 内容: %s", mime, debugFormatContent(content))
-			changes <- ClipboardChange{
+			select {
+			case changes <- ClipboardChange{
 				Timestamp: time.Now().Unix(),
 				Mime:      mime,
 				Content:   content,
+			}:
+			case <-stopCh:
+				errCh <- nil
+				return
 			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			errCh <- fmt.Errorf("xsel 管道错误: %w", err)
+		} else {
+			errCh <- fmt.Errorf("xsel 进程退出 (EOF)")
 		}
 	}()
 
-	log.Print("开始通过xsel监听剪贴板 (X11)")
-	return changes
+	log.Print("[CLIPBOARD] 开始通过 xsel 监听剪贴板 (X11)")
+	return errCh
 }
 
 // ==================== 辅助函数 ====================

@@ -11,6 +11,8 @@
 - **类型过滤**: 支持按内容类型（text/image）过滤
 - **连接池**: MQTT 连接复用，支持自动重连
 - **重试机制**: MQTT 和 HTTP 客户端均支持失败重试
+- **版本信息**: 通过 `--version` / `-v` 查看版本和构建信息
+- **管道健壮性**: Linux 下自动监测监听进程异常并重启，支持最大运行时间配置
 - **优雅停机**: 支持 SIGTERM/SIGINT 信号平滑退出
 - **消息转发**: 支持将收到的消息转发到其他目标（中继模式）
 - **配置灵活**: 支持环境变量和 .env 文件配置
@@ -19,8 +21,8 @@
 
 ### 环境要求
 
-- Go 1.19+
-- Linux: xclip（可选）
+- Go 1.24+
+- Linux: xclip/xsel（可选）、wl-clipboard（Wayland）
 - Windows: 无特殊依赖
 
 ### 构建
@@ -58,6 +60,9 @@ CLIPBOARD_SYNC_URLS=mqtt://host:1883/linux-clipboard/{$type}?types=text,image;ht
 
 # 调试模式
 CLIPBOARD_DEBUG=1
+
+# 最大运行时间（秒），到期自动重启监听进程（默认 3600）
+CLIPBOARD_MAX_RUNTIME=3600
 
 # 消息转发（收到消息后转发到其他目标，格式与 CLIPBOARD_SYNC_URLS 一致）
 CLIPBOARD_FORWARD_URLS=mqtt://other-host:1883/forward-topic/{$type};http://other-host:18884/update-clipboard
@@ -98,6 +103,10 @@ LOCAL_SERVER_PORT=:9144
 ```bash
 # 正常模式（监听剪贴板变化并同步）
 ./clipboard-sync
+
+# 查看版本信息
+./clipboard-sync --version
+./clipboard-sync -v
 
 # 指定配置文件
 ./clipboard-sync -env-file /path/to/config.env
@@ -218,6 +227,7 @@ http://host:18884/update?retries=2&retryDelay=200
 ```
 .
 ├── main.go           # 主程序入口，剪贴板变化处理
+├── version.go        # 版本信息
 ├── type.go           # 数据结构定义
 ├── sync.go           # 同步逻辑（MQTT/HTTP）
 ├── mqtt_client.go     # MQTT 客户端和连接池

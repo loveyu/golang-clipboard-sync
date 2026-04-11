@@ -191,7 +191,14 @@ func main() {
 	envFile := flag.String("env-file", "", "Path to .env file")
 	receivedWriteText := flag.String("received-write-text", "", "Write text to clipboard (for testing)")
 	receivedImageFile := flag.String("received-image-file", "", "Write image file to clipboard (for testing)")
+	var versionFlag bool
+	flag.BoolVar(&versionFlag, "version", false, "Print version information")
+	flag.BoolVar(&versionFlag, "v", false, "Print version information (shorthand)")
 	flag.Parse()
+
+	if versionFlag {
+		printVersion()
+	}
 
 	// 初始化环境变量（必须在 flag.Parse 之后，以便处理 -env-file 参数）
 	initEnv(*envFile)
