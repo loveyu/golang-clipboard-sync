@@ -62,20 +62,22 @@ func getMaxRuntime() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// DetectClipboardMime 检测当前剪贴板的MIME类型
+// DetectClipboardMime 检测当前剪贴板的MIME类型（返回首选类型）
 func DetectClipboardMime() string {
 	if isWayland {
-		return detectClipboardMimeWayland()
+		primary, _ := detectClipboardMimeWayland()
+		return primary
 	}
-	return detectClipboardMimeX11()
+	primary, _ := detectClipboardMimeX11()
+	return primary
 }
 
 // ReadClipboardContent 依据类型读取剪贴板
 func ReadClipboardContent(mime string) ([]byte, error) {
 	if isWayland {
-		return readClipboardContentWayland(mime)
+		return readClipboardContentWayland(mime, "")
 	}
-	return readClipboardContentX11(mime)
+	return readClipboardContentX11(mime, "")
 }
 
 // SetClipboardContentText 设置剪贴板文本内容
@@ -153,30 +155,83 @@ func startClipboardMonitorPipe(changes chan<- ClipboardChange) <-chan error {
 
 // ==================== Wayland 实现 ====================
 
-func detectClipboardMimeWayland() string {
+func detectClipboardMimeWayland() (string, string) {
 	cmd := exec.Command("wl-paste", "--list-types")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "text/plain"
+		return "text/plain", ""
 	}
-	types := strings.Fields(string(output))
-	for _, t := range types {
-		if t == "text/plain" || t == "text/html" || t == "text/plain;charset=utf-8" {
-			return "text/plain"
+
+	var types []string
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		t := strings.TrimSpace(scanner.Text())
+		if t != "" {
+			types = append(types, t)
 		}
 	}
+
+	// Image takes priority
 	for _, t := range types {
 		if strings.HasPrefix(t, "image/") {
-			return t
+			return t, ""
 		}
 	}
-	if len(types) > 0 {
-		return types[0]
+
+	// Collect text candidates: prefer UTF-8, then any text/plain variant, then X atom strings
+	var utf8Type, anyTextType, xStrType string
+	for _, t := range types {
+		lower := strings.ToLower(t)
+		if strings.HasPrefix(lower, "text/plain") {
+			charset := extractCharset(t)
+			if isUTF8Charset(charset) && utf8Type == "" {
+				utf8Type = t
+			} else if anyTextType == "" && !isUTF8Charset(charset) {
+				anyTextType = t
+			}
+		}
+		if xStrType == "" && (t == "UTF8_STRING" || t == "STRING" || t == "TEXT") {
+			xStrType = t
+		}
 	}
-	return "text/plain"
+
+	if utf8Type != "" {
+		fallback := anyTextType
+		if fallback == "" {
+			fallback = xStrType
+		}
+		return utf8Type, fallback
+	}
+	if anyTextType != "" {
+		return anyTextType, xStrType
+	}
+	if xStrType != "" {
+		return xStrType, ""
+	}
+	if len(types) > 0 {
+		return types[0], ""
+	}
+	return "text/plain", ""
 }
 
-func readClipboardContentWayland(mime string) ([]byte, error) {
+func readClipboardContentWayland(primary, fallback string) ([]byte, error) {
+	data, err := runWlPaste(primary)
+	if err != nil && fallback != "" {
+		data, err = runWlPaste(fallback)
+		if err != nil {
+			return nil, err
+		}
+		data = removeTrailingNewline(data)
+		return convertToUTF8(data, fallback), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	data = removeTrailingNewline(data)
+	return convertToUTF8(data, primary), nil
+}
+
+func runWlPaste(mime string) ([]byte, error) {
 	cmd := exec.Command("wl-paste", "-t", mime)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -186,11 +241,10 @@ func readClipboardContentWayland(mime string) ([]byte, error) {
 		return nil, err
 	}
 	output, err := io.ReadAll(stdout)
+	cmd.Wait()
 	if err != nil {
 		return nil, err
 	}
-	cmd.Wait()
-	output = removeTrailingNewline(output)
 	return output, nil
 }
 
@@ -248,15 +302,15 @@ func listenClipboardChangesWaylandPipe(changes chan<- ClipboardChange) <-chan er
 				continue
 			}
 			timestamp := scanner.Text()
-			mime := detectClipboardMimeWayland()
-			content, _ := readClipboardContentWayland(mime)
-			debugLog("剪贴板变更 (Wayland) - MIME: %s, 内容: %s", mime, debugFormatContent(content))
+			primary, fallback := detectClipboardMimeWayland()
+			content, _ := readClipboardContentWayland(primary, fallback)
+			debugLog("剪贴板变更 (Wayland) - MIME: %s, 内容: %s", primary, debugFormatContent(content))
 			var ts int64
 			fmt.Sscanf(timestamp, "%d", &ts)
 			select {
 			case changes <- ClipboardChange{
 				Timestamp: ts,
-				Mime:      mime,
+				Mime:      primary,
 				Content:   content,
 			}:
 			case <-stopCh:
@@ -278,40 +332,86 @@ func listenClipboardChangesWaylandPipe(changes chan<- ClipboardChange) <-chan er
 
 // ==================== X11 实现 ====================
 
-func detectClipboardMimeX11() string {
+func detectClipboardMimeX11() (string, string) {
 	cmd := exec.Command("xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "text/plain"
+		return "text/plain", ""
 	}
 	types := strings.Fields(string(output))
-	for _, t := range types[1:] {
-		if t == "TEXT" || t == "STRING" || t == "UTF8_STRING" {
-			return "text/plain"
-		}
-		if strings.HasPrefix(t, "image/") || t == "image/png" || t == "image/bmp" {
-			return "image/png"
+
+	// Image takes priority; return the actual image type
+	for _, t := range types {
+		if strings.HasPrefix(t, "image/") {
+			return t, ""
 		}
 	}
-	return "text/plain"
+
+	// Prefer UTF8_STRING, then STRING/TEXT as fallback
+	var primary, fallback string
+	for _, t := range types {
+		switch t {
+		case "UTF8_STRING":
+			if primary == "" {
+				primary = t
+			}
+		case "STRING", "TEXT":
+			if fallback == "" {
+				fallback = t
+			}
+		default:
+			lower := strings.ToLower(t)
+			if strings.HasPrefix(lower, "text/plain") {
+				charset := extractCharset(t)
+				if isUTF8Charset(charset) && primary == "" {
+					primary = t
+				} else if !isUTF8Charset(charset) && fallback == "" {
+					fallback = t
+				}
+			}
+		}
+	}
+
+	if primary != "" {
+		return primary, fallback
+	}
+	if fallback != "" {
+		return fallback, ""
+	}
+	return "text/plain", ""
 }
 
-func readClipboardContentX11(mime string) ([]byte, error) {
-	selection := "clipboard"
-	if strings.HasPrefix(mime, "image/") {
-		cmd := exec.Command("xclip", "-selection", selection, "-t", "image/png", "-o")
-		output, err := cmd.CombinedOutput()
+func readClipboardContentX11(primary, fallback string) ([]byte, error) {
+	data, err := runXclip(primary)
+	if err != nil && fallback != "" {
+		data, err = runXclip(fallback)
 		if err != nil {
 			return nil, err
 		}
-		return output, nil
+		data = removeTrailingNewline(data)
+		return convertToUTF8(data, fallback), nil
 	}
-	cmd := exec.Command("xclip", "-selection", selection, "-o")
+	if err != nil {
+		return nil, err
+	}
+	data = removeTrailingNewline(data)
+	return convertToUTF8(data, primary), nil
+}
+
+func runXclip(mime string) ([]byte, error) {
+	var cmd *exec.Cmd
+	if strings.HasPrefix(mime, "image/") {
+		cmd = exec.Command("xclip", "-selection", "clipboard", "-t", mime, "-o")
+	} else if mime == "UTF8_STRING" || mime == "STRING" || mime == "TEXT" {
+		// For X atoms, let xclip pick the default (UTF8_STRING) output
+		cmd = exec.Command("xclip", "-selection", "clipboard", "-o")
+	} else {
+		cmd = exec.Command("xclip", "-selection", "clipboard", "-t", mime, "-o")
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, err
 	}
-	output = removeTrailingNewline(output)
 	return output, nil
 }
 
@@ -371,13 +471,13 @@ func listenClipboardChangesX11Pipe(changes chan<- ClipboardChange) <-chan error 
 			if loop == 0 {
 				continue
 			}
-			mime := detectClipboardMimeX11()
-			content, _ := readClipboardContentX11(mime)
-			debugLog("剪贴板变更 (X11) - MIME: %s, 内容: %s", mime, debugFormatContent(content))
+			primary, fallback := detectClipboardMimeX11()
+			content, _ := readClipboardContentX11(primary, fallback)
+			debugLog("剪贴板变更 (X11) - MIME: %s, 内容: %s", primary, debugFormatContent(content))
 			select {
 			case changes <- ClipboardChange{
 				Timestamp: time.Now().Unix(),
-				Mime:      mime,
+				Mime:      primary,
 				Content:   content,
 			}:
 			case <-stopCh:

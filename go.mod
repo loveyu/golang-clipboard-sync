@@ -6,6 +6,7 @@ require (
 	github.com/eclipse/paho.mqtt.golang v1.4.3
 	golang.design/x/clipboard v0.7.0
 	golang.org/x/sys v0.18.0
+	golang.org/x/text v0.14.0
 )
 
 require (

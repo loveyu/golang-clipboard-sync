@@ -16,11 +16,18 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 // LoadEnvFile 加载 .env 文件到环境变量
@@ -137,4 +144,82 @@ func generateUUID() string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
+// extractCharset parses the charset parameter from a MIME type like "text/plain;charset=utf-8".
+func extractCharset(mime string) string {
+	for _, part := range strings.Split(mime, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(strings.ToLower(part), "charset=") {
+			return strings.ToLower(strings.TrimPrefix(strings.ToLower(part), "charset="))
+		}
+	}
+	return ""
+}
+
+// isUTF8Charset reports whether a charset name is a UTF-8 variant.
+func isUTF8Charset(cs string) bool {
+	switch cs {
+	case "utf-8", "utf8", "us-ascii", "ascii", "":
+		return true
+	}
+	return false
+}
+
+// convertToUTF8 converts data from the charset encoded in the MIME type to UTF-8.
+// Returns the original data unchanged if already UTF-8 or charset is unknown.
+func convertToUTF8(data []byte, mime string) []byte {
+	charset := extractCharset(mime)
+	switch charset {
+	case "", "utf-8", "utf8", "us-ascii", "ascii":
+		return data
+	case "utf-16", "unicode":
+		// Detect BOM or default to little-endian
+		dec := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM)
+		out, _, err := transform.Bytes(dec.NewDecoder(), data)
+		if err == nil {
+			return out
+		}
+		return decodeUTF16LE(data)
+	case "utf-16le", "utf-16-le":
+		out, _, err := transform.Bytes(unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder(), data)
+		if err == nil {
+			return out
+		}
+		return decodeUTF16LE(data)
+	case "utf-16be", "utf-16-be":
+		out, _, err := transform.Bytes(unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM).NewDecoder(), data)
+		if err == nil {
+			return out
+		}
+		return data
+	case "iso-8859-1", "latin-1", "latin1":
+		out, _, err := transform.Bytes(charmap.ISO8859_1.NewDecoder(), data)
+		if err == nil {
+			return out
+		}
+		return data
+	default:
+		if utf8.Valid(data) {
+			return data
+		}
+		return data
+	}
+}
+
+// decodeUTF16LE decodes UTF-16 little-endian bytes to UTF-8.
+func decodeUTF16LE(b []byte) []byte {
+	if len(b)%2 != 0 {
+		b = b[:len(b)-1]
+	}
+	u16 := make([]uint16, len(b)/2)
+	for i := range u16 {
+		u16[i] = uint16(b[2*i]) | uint16(b[2*i+1])<<8
+	}
+	runes := utf16.Decode(u16)
+	var buf bytes.Buffer
+	for _, r := range runes {
+		buf.WriteRune(r)
+	}
+	return buf.Bytes()
 }
