@@ -209,8 +209,8 @@ EOF
     wait $sub_pid 2>/dev/null || true
 
     if [ -s "${outfile}" ]; then
-        local type=$(python3 -c "import json; d=json.load(open('${outfile}')); print(d.get('type',''))")
-        local content=$(python3 -c "import json,base64; d=json.load(open('${outfile}')); print(base64.b64decode(d['content']).decode())")
+        local type=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('type',''))" "${outfile}")
+        local content=$(python3 -c "import json,base64,sys; d=json.load(open(sys.argv[1])); print(base64.b64decode(d['content']).decode())" "${outfile}")
         if [ "$type" = "text" ] && [ "$content" = "Hello V1" ]; then
             log_pass "type=$type content=$content"
         else
@@ -245,8 +245,8 @@ EOF
     wait $sub_pid 2>/dev/null || true
 
     if [ -s "${outfile}" ]; then
-        local type=$(python3 -c "import json; d=json.load(open('${outfile}')); print(d.get('type',''))")
-        local mime=$(python3 -c "import json; d=json.load(open('${outfile}')); print(d.get('mime',''))")
+        local type=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('type',''))" "${outfile}")
+        local mime=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('mime',''))" "${outfile}")
         if [ "$type" = "image" ] && [ "$mime" = "image/png" ]; then
             log_pass "type=$type mime=$mime"
         else
@@ -292,8 +292,8 @@ EOF
     wait $sub_pid 2>/dev/null || true
 
     if [ -s "${outfile}" ]; then
-        local type=$(python3 -c "import json; d=json.load(open('${outfile}')); print(d.get('type',''))")
-        local content=$(python3 -c "import json; d=json.load(open('${outfile}')); print(d.get('content',''))")
+        local type=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('type',''))" "${outfile}")
+        local content=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('content',''))" "${outfile}")
 
         if [ "$type" != "text-v2" ]; then
             log_fail "expected type=text-v2, got type=$type"
@@ -361,8 +361,8 @@ EOF
     wait $sub_pid 2>/dev/null || true
 
     if [ -s "${outfile}" ]; then
-        local type=$(python3 -c "import json; d=json.load(open('${outfile}')); print(d.get('type',''))")
-        local content=$(python3 -c "import json; d=json.load(open('${outfile}')); print(d.get('content',''))")
+        local type=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('type',''))" "${outfile}")
+        local content=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('content',''))" "${outfile}")
 
         if [ "$type" != "image-v2" ]; then
             log_fail "expected type=image-v2, got type=$type"
