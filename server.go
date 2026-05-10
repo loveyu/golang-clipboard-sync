@@ -50,20 +50,25 @@ func startLocalServer() {
 
 		log.Printf("Received clipboard via HTTP: device=%s, type=%s, mime=%s", msg.DeviceName, msg.Type, msg.Mime)
 
-		// Handle V2 messages
+		// Handle V2 messages: download content from center and convert to V1
 		if IsV2Type(msg.Type) {
-			// For HTTP-received V2 messages, try to find center
-			// This is less common but possible if a forward-center sends V2 via HTTP
-			log.Printf("[WARN] V2 message received via HTTP but center not supported for HTTP source")
-			_, _ = w.Write([]byte("ok"))
-			return
+			centerID := findCenterForSource("http")
+			if centerID != "" {
+				center := appConfig.GetCenterByID(centerID)
+				if center != nil {
+					v1Msg, err := handleV2Receive(msg, center)
+					if err != nil {
+						log.Printf("[ERROR] V2 receive via HTTP failed: %v", err)
+					} else if v1Msg != nil {
+						msg = *v1Msg
+					}
+				}
+			}
 		}
 
-		setClipboardContent(msg)
-
-		// Trigger forward engine if available
+		// Route through forward engine with "http" as source ID
 		if forwardEngine != nil {
-			go forwardEngine.ProcessMessage("system", msg)
+			go forwardEngine.ProcessMessage("http", msg)
 		}
 
 		_, _ = w.Write([]byte("ok"))

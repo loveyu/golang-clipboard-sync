@@ -260,73 +260,41 @@ func handleMQTTMessage(entry *ListenEntry, topic string, payload []byte) {
 
 	log.Printf("Received clipboard via MQTT: device=%s, type=%s, listen=%s", msg.DeviceName, msg.Type, entry.ID)
 
-	// Handle V2 messages
+	// Handle V2 messages: download content from center and convert to V1
 	if IsV2Type(msg.Type) {
-		// Find center from forward rules
-		centerID := findCenterForListen(entry.ID)
+		centerID := findCenterForSource(entry.ID)
 		if centerID != "" {
 			center := appConfig.GetCenterByID(centerID)
 			if center != nil {
-				if err := handleV2Receive(msg, center); err != nil {
+				v1Msg, err := handleV2Receive(msg, center)
+				if err != nil {
 					log.Printf("[ERROR] V2 receive failed: %v", err)
+				} else if v1Msg != nil {
+					msg = *v1Msg
 				}
-				// Continue to forward engine
-				go forwardEngine.ProcessMessage(entry.ID, msg)
-				return
 			}
 		}
-		log.Printf("[WARN] V2 message received but no center configured for listen %s", entry.ID)
-		return
 	}
 
-	// V1 message: set clipboard and trigger forward engine
+	// Route through forward engine (handles "system" target for local clipboard)
 	if forwardEngine != nil {
-		// Check if any forward rule routes to "system" for this listen entry
-		if shouldSetLocalClipboard(entry.ID) {
-			setClipboardContent(msg)
-		}
 		go forwardEngine.ProcessMessage(entry.ID, msg)
 	}
 }
 
-// findCenterForListen finds the center ID from a forward rule matching a listen entry.
-func findCenterForListen(listenID string) string {
+// findCenterForSource finds the center ID from a forward rule matching a source ID.
+// Works for listen entry IDs and the "http" reserved ID.
+func findCenterForSource(sourceID string) string {
 	if appConfig == nil {
 		return ""
 	}
 	for i := range appConfig.Forward {
 		rule := &appConfig.Forward[i]
 		for _, from := range rule.From {
-			if from == listenID && rule.Center != "" {
+			if from == sourceID && rule.Center != "" {
 				return rule.Center
 			}
 		}
 	}
 	return ""
-}
-
-// shouldSetLocalClipboard checks if any forward rule routes from a listen entry to "system".
-func shouldSetLocalClipboard(listenID string) bool {
-	if appConfig == nil {
-		return true
-	}
-	for i := range appConfig.Forward {
-		rule := &appConfig.Forward[i]
-		fromMatch := false
-		for _, from := range rule.From {
-			if from == listenID {
-				fromMatch = true
-				break
-			}
-		}
-		if !fromMatch {
-			continue
-		}
-		for _, to := range rule.To {
-			if to == "system" {
-				return true
-			}
-		}
-	}
-	return false
 }

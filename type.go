@@ -60,13 +60,14 @@ func V2ContentType(t string) string {
 }
 
 // V2Content represents a parsed V2 relay content string.
-// Format: "clientId/msgId,centerId:xxx,sha1:xxxxx,length:1111"
+// Format: "clientId/msgId,centerId:xxx,sha1:xxxxx,length:1111,encoding:base64"
 type V2Content struct {
-	ClientID string
-	MsgID    string
-	CenterID string
-	SHA1     string
-	Length   int
+	ClientID  string
+	MsgID     string
+	CenterID  string
+	SHA1      string
+	Length    int
+	Encoding  string // "base64" or "raw"
 }
 
 // ParseV2Content parses a V2 relay content string.
@@ -101,6 +102,8 @@ func ParseV2Content(s string) (*V2Content, error) {
 			if n, err := strconv.Atoi(kv[1]); err == nil {
 				v2.Length = n
 			}
+		case "encoding":
+			v2.Encoding = kv[1]
 		}
 	}
 
@@ -108,9 +111,9 @@ func ParseV2Content(s string) (*V2Content, error) {
 }
 
 // BuildV2Content builds a V2 relay content string.
-func BuildV2Content(clientID, msgID, centerID, sha1 string, length int) string {
-	return fmt.Sprintf("%s/%s,centerId:%s,sha1:%s,length:%d",
-		clientID, msgID, centerID, sha1, length)
+func BuildV2Content(clientID, msgID, centerID, sha1 string, length int, encoding string) string {
+	return fmt.Sprintf("%s/%s,centerId:%s,sha1:%s,length:%d,encoding:%s",
+		clientID, msgID, centerID, sha1, length, encoding)
 }
 
 // ClipboardMessage 剪贴板同步消息格式

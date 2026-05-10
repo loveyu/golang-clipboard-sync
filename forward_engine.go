@@ -162,16 +162,28 @@ func (e *ForwardEngine) forwardViaMQTT(target *TargetEntry, msg ClipboardMessage
 			msgID = "clipboard-" + BaseContentType(msg.Type)
 		}
 
+		// Determine upload data: base64 (default) or raw
+		var uploadData []byte
+		if centerCfg.RawContent {
+			uploadData = decoded
+		} else {
+			uploadData = []byte(msg.Content)
+		}
+
 		// PUT to center
 		deviceName := e.cfg.Device.Name
-		if err := putToCenter(centerCfg, deviceName, msgID, decoded, contentType); err != nil {
+		if err := putToCenter(centerCfg, deviceName, msgID, uploadData, contentType); err != nil {
 			log.Printf("[ERROR] Failed to PUT to center %s: %v", centerID, err)
 			return
 		}
 
 		// Build V2 message
 		sha1Hash := computeSHA1(decoded)
-		v2Content := BuildV2Content(deviceName, msgID, centerID, sha1Hash, len(decoded))
+		encoding := "base64"
+			if centerCfg.RawContent {
+				encoding = "raw"
+			}
+			v2Content := BuildV2Content(deviceName, msgID, centerID, sha1Hash, len(decoded), encoding)
 
 		publishMsg = ClipboardMessage{
 			Time:       msg.Time,
@@ -184,8 +196,12 @@ func (e *ForwardEngine) forwardViaMQTT(target *TargetEntry, msg ClipboardMessage
 		}
 
 		if debugClipboard {
-			log.Printf("[DEBUG] V2 relay: PUT %d bytes to center %s, MQTT type=%s",
-				len(decoded), centerID, publishMsg.Type)
+			enc := "base64"
+			if centerCfg.RawContent {
+				enc = "raw"
+			}
+			log.Printf("[DEBUG] V2 relay: PUT %d bytes (%s) to center %s, MQTT type=%s",
+				len(uploadData), enc, centerID, publishMsg.Type)
 		}
 	} else {
 		publishMsg = msg

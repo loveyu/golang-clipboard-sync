@@ -177,25 +177,38 @@ func needsRelay(msgType string, base64Content string) bool {
 	return false
 }
 
-// handleV2Receive processes a V2 message: download content from center and set clipboard.
-func handleV2Receive(msg ClipboardMessage, center *Center) error {
+// handleV2Receive processes a V2 message: download content from center and return V1 message.
+func handleV2Receive(msg ClipboardMessage, center *Center) (*ClipboardMessage, error) {
 	v2, err := ParseV2Content(msg.Content)
 	if err != nil {
-		return fmt.Errorf("parse V2 content: %w", err)
+		return nil, fmt.Errorf("parse V2 content: %w", err)
 	}
 
 	data, ct, err := getFromCenter(center, v2.ClientID, v2.MsgID)
 	if err != nil {
-		return fmt.Errorf("get from center: %w", err)
+		return nil, fmt.Errorf("get from center: %w", err)
 	}
 
 	if debugClipboard {
 		log.Printf("[DEBUG] V2 download: %d bytes, content-type: %s", len(data), ct)
 	}
 
-	// Reconstruct a V1 message for local clipboard
-	base64Content := base64.StdEncoding.EncodeToString(data)
-	v1Msg := ClipboardMessage{
+	// Decode based on encoding from V2 message (default: base64)
+	var decoded []byte
+	if v2.Encoding == "raw" {
+		decoded = data
+	} else {
+		var err2 error
+		decoded, err2 = base64.StdEncoding.DecodeString(string(data))
+		if err2 != nil {
+			log.Printf("[WARN] V2 base64 decode failed, using raw data: %v", err2)
+			decoded = data
+		}
+	}
+
+	// Reconstruct a V1 message
+	base64Content := base64.StdEncoding.EncodeToString(decoded)
+	v1Msg := &ClipboardMessage{
 		Time:       msg.Time,
 		UUID:       msg.UUID,
 		DeviceName: msg.DeviceName,
@@ -204,6 +217,5 @@ func handleV2Receive(msg ClipboardMessage, center *Center) error {
 		Content:    base64Content,
 		SendTime:   msg.SendTime,
 	}
-	setClipboardContent(v1Msg)
-	return nil
+	return v1Msg, nil
 }

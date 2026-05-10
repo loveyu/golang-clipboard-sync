@@ -56,6 +56,7 @@ type Center struct {
 	TextMsgID   string `yaml:"textMsgId"`
 	ImageMsgID  string `yaml:"imageMsgId"`
 	Certificate string `yaml:"certificate"` // references Certificate.ID
+	RawContent  bool   `yaml:"rawContent"`  // false=store base64 (default), true=store raw bytes
 }
 
 type ListenEntry struct {
@@ -144,6 +145,9 @@ func LoadConfig(path string) (*Config, error) {
 		if e.ID == "" {
 			return nil, fmt.Errorf("listen entry missing id")
 		}
+		if isReservedID(e.ID) {
+			return nil, fmt.Errorf("listen entry uses reserved id: %s", e.ID)
+		}
 		if _, dup := cfg.listenByID[e.ID]; dup {
 			return nil, fmt.Errorf("duplicate listen id: %s", e.ID)
 		}
@@ -158,6 +162,9 @@ func LoadConfig(path string) (*Config, error) {
 		t := &cfg.Targets[i]
 		if t.ID == "" {
 			return nil, fmt.Errorf("target entry missing id")
+		}
+		if isReservedID(t.ID) {
+			return nil, fmt.Errorf("target entry uses reserved id: %s", t.ID)
 		}
 		if _, dup := cfg.targetByID[t.ID]; dup {
 			return nil, fmt.Errorf("duplicate target id: %s", t.ID)
@@ -181,7 +188,7 @@ func LoadConfig(path string) (*Config, error) {
 	// Validate forward rules
 	for i, rule := range cfg.Forward {
 		for _, id := range rule.From {
-			if id != "system" && cfg.listenByID[id] == nil {
+			if id != "system" && id != "http" && cfg.listenByID[id] == nil {
 				return nil, fmt.Errorf("forward[%d].from references unknown id: %s", i, id)
 			}
 		}
@@ -219,6 +226,13 @@ func ConfigPath() string {
 		return p
 	}
 	return "config.yaml"
+}
+
+// isReservedID checks if an ID is a reserved keyword that cannot be used for
+// user-defined entries (listen, target, center).
+// Reserved IDs: "system" (local clipboard), "http" (HTTP receive endpoint).
+func isReservedID(id string) bool {
+	return id == "system" || id == "http"
 }
 
 func IsDebug() bool {

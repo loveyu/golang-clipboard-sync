@@ -1,75 +1,213 @@
 # clipboard-sync
 
-跨平台剪贴板同步工具，支持通过 MQTT 和 HTTP 协议同步剪贴板内容。
+跨平台剪贴板同步工具，通过 YAML 配置文件灵活管理 MQTT、HTTP 多协议同步。
 
 ## 功能特性
 
-- **多协议支持**: 同时支持 MQTT 和 HTTP 协议同步
-- **跨平台**: 支持 Linux 和 Windows 系统
-- **内容类型**: 支持文本和图片（Base64 编码传输）
-- **网络过滤**: 支持根据本地网卡 IP 网段和网卡名称进行过滤
-- **类型过滤**: 支持按内容类型（text/image）过滤
-- **连接池**: MQTT 连接复用，支持自动重连
-- **重试机制**: MQTT 和 HTTP 客户端均支持失败重试
-- **版本信息**: 通过 `--version` / `-v` 查看版本和构建信息
-- **管道健壮性**: Linux 下自动监测监听进程异常并重启，支持最大运行时间配置
-- **优雅停机**: 支持 SIGTERM/SIGINT 信号平滑退出
-- **消息转发**: 支持将收到的消息转发到其他目标（中继模式）
-- **配置灵活**: 支持环境变量和 .env 文件配置
+- **YAML 配置**: 统一的配置文件管理所有参数，支持远程配置下载
+- **多协议支持**: MQTT（发布/订阅）和 HTTP（推送）协议
+- **跨平台**: Linux（X11/Wayland）、macOS、Windows
+- **转发规则引擎**: 灵活的消息路由，支持多源多目标、自动去重
+- **V2 中继协议**: 大文件通过 HTTP 中心服务器中继，MQTT 仅传输引用
+- **证书支持**: 自定义 CA、mTLS 客户端证书
+- **网络过滤**: 根据本地 IP 网段和网卡名称过滤
+- **连接池**: MQTT 连接按 broker+credentials 共享复用
+- **自动重启**: 监听进程异常退出后指数退避重启
 
 ## 快速开始
 
 ### 环境要求
 
 - Go 1.24+
-- Linux: xclip/xsel（可选）、wl-clipboard（Wayland）
+- Linux: xclip/xsel（X11）或 wl-clipboard（Wayland）
+- macOS: pbcopy/pbpaste、osascript（系统自带）
 - Windows: 无特殊依赖
 
 ### 构建
 
 ```bash
-# Linux AMD64
-./build_linux.sh
-
-# Linux ARM64
-./build_linux.sh arm64
-
-# Windows（在 Linux 上交叉编译）
-./build_windows.sh
+go build -o clipboard-sync .
 ```
 
 ### 配置
 
-创建 `.env` 文件或设置环境变量：
+创建 `config.yaml` 配置文件（参考 `config-example.yaml`）：
+
+```yaml
+device:
+  name: "my-device"
+  allowedInterfacePatterns: "eth*,enp*,wlp*"
+  maxRuntime: 3600
+
+debug: false
+
+http:
+  port: ":9144"
+
+targets:
+  - id: "mqtt-pub"
+    dsn: "mqtt://user:pass@broker:1883/clipboard/{$type}/my-device"
+
+forward:
+  - from: ["system"]
+    to: ["mqtt-pub"]
+```
+
+### 运行
 
 ```bash
-# 设备名称（必需）
-CLIPBOARD_DEVICE_NAME=22081212C
+# 启动服务（默认命令）
+./clipboard-sync
 
-# MQTT 配置
-CLIPBOARD_SYNC_URLS=mqtt://localhost:1883/linux-clipboard/{$type}?clientId=client1
+# 指定配置文件
+./clipboard-sync -config /path/to/config.yaml
 
-# HTTP 配置
-CLIPBOARD_SYNC_URLS=http://localhost:18884/update-clipboard
+# 远程下载配置
+./clipboard-sync download-config
 
-# 同时使用多个协议（分号分隔）
-CLIPBOARD_SYNC_URLS=mqtt://host:1883/linux-clipboard/{$type};http://host:18884/update
+# 查看版本
+./clipboard-sync version
 
-# 类型过滤（可选，在URL中指定types参数）
-CLIPBOARD_SYNC_URLS=mqtt://host:1883/linux-clipboard/{$type}?types=text,image;http://host:18884/update?types=text
-
-# 调试模式
-CLIPBOARD_DEBUG=1
-
-# 最大运行时间（秒），到期自动重启监听进程（默认 3600）
-CLIPBOARD_MAX_RUNTIME=3600
-
-# 消息转发（收到消息后转发到其他目标，格式与 CLIPBOARD_SYNC_URLS 一致）
-CLIPBOARD_FORWARD_URLS=mqtt://other-host:1883/forward-topic/{$type};http://other-host:18884/update-clipboard
-
-# 本地 HTTP 服务器端口（默认 :9144）
-LOCAL_SERVER_PORT=:9144
+# 测试模式（直接写入剪贴板并触发同步）
+./clipboard-sync --received-write-text "Hello World"
+./clipboard-sync --received-image-file /path/to/image.png
 ```
+
+### 环境变量
+
+仅保留两个环境变量：
+
+| 变量 | 说明 |
+|------|------|
+| `CLIPBOARD_CONFIG_PATH` | 配置文件路径，默认 `config.yaml` |
+| `CLIPBOARD_DEBUG` | 调试模式，设为 `1` 启用 |
+| `REMOTE_CONFIG_URL` | 远程配置下载 URL（用于 `download-config` 命令） |
+
+## 配置详解
+
+### device - 设备配置
+
+```yaml
+device:
+  name: "my-notebook"                   # 设备名称，留空则使用主机名
+  allowedInterfacePatterns: "eth*,enp*" # 网卡名称过滤（通配符）
+  maxRuntime: 3600                      # 监听器最大运行时间(秒)
+```
+
+### http - 本地 HTTP 服务器
+
+```yaml
+http:
+  port: ":9144"   # 监听端口
+```
+
+本地 HTTP 服务器接收 `/update-clipboard` 端点的消息，接收到的消息以 `"http"` 作为来源 ID 进入转发规则。
+
+### certificates - 证书配置
+
+```yaml
+certificates:
+  - id: "home-ca"
+    ca: "/path/to/ca.crt"               # CA 证书
+  - id: "mtls"
+    ca: "/path/to/ca.crt"
+    cert: "/path/to/client.crt"         # 客户端证书 (mTLS)
+    key: "/path/to/client.key"          # 客户端密钥 (mTLS)
+```
+
+被 `centers` 和 MQTT DSN 的 `certificate` 参数引用。
+
+### centers - 剪贴板中心
+
+```yaml
+centers:
+  - id: "home"
+    url: "http://10.0.0.1:8080"         # 中心 HTTP 地址
+    token: "secure-token"               # Bearer token 认证
+    textMsgId: "clipboard-text"         # 文本消息 ID
+    imageMsgId: "clipboard-image"       # 图片消息 ID
+    rawContent: false                   # 存储编码: false=Base64(默认), true=原始内容
+    # certificate: "home-ca"            # HTTPS 时引用证书
+```
+
+中心服务器用于 V2 中继协议。当转发规则配置了 `center` 时，图片或超过 10KB 的文本会先 PUT 到中心，再通过 MQTT 发送引用。
+
+- `rawContent: false`（默认）: 中心存储 Base64 编码的内容，Content-Type 保持原始类型
+- `rawContent: true`: 中心存储原始内容，便于外部直接预览
+
+### listen - MQTT 订阅入口
+
+```yaml
+listen:
+  - id: "home-recv"
+    dsn: "mqtt://user:pass@10.0.0.1:1883/clipboard/{$type}/+?maxMessageSize=5MB"
+    allowInterfaceIps: "10.0.0.0/24"    # IP 网段过滤（可选）
+```
+
+DSN 格式: `mqtt[s]://[user:pass@]host:port/topic[?params]`
+
+`{$type}` 在订阅时自动替换为 MQTT 通配符 `+`。
+
+支持的参数:
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `maxMessageSize` | 最大消息大小（如 `5MB`、`512KB`） | 无限制 |
+| `certificate` | 引用 certificates 中的 ID | 无 |
+| `clientId` | MQTT 客户端 ID | 自动生成 |
+| `connectTimeout` | 连接超时(秒) | 3 |
+| `keepAliveInterval` | 心跳间隔(秒) | 60 |
+| `automaticReconnect` | 自动重连 | true |
+| `qos` | QoS 等级 (0/1/2) | 1 |
+| `retain` | 保留消息 | true |
+
+### targets - 发布目标
+
+```yaml
+targets:
+  - id: "mqtt-pub"
+    dsn: "mqtt://user:pass@10.0.0.1:1883/clipboard/{$type}/my-device"
+    allowInterfaceIps: "10.0.0.0/24"
+  - id: "http-relay"
+    dsn: "http://10.0.0.1:9144/update-clipboard"
+```
+
+支持 MQTT 和 HTTP 两种协议。`{$type}` 在发布时替换为 `text` 或 `image`。
+
+HTTP 目标额外参数:
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `types` | 允许的内容类型 | 全部 |
+| `retries` | 失败重试次数 | 0 |
+| `retryDelay` | 重试延迟(ms) | 50 |
+
+### forward - 转发规则
+
+```yaml
+forward:
+  - from: ["system"]
+    to: ["mqtt-pub"]
+    center: "home"        # 可选，启用 V2 中继
+
+  - from: ["home-recv"]
+    to: ["system"]
+    center: "home"
+
+  - from: ["http"]
+    to: ["system", "mqtt-pub"]
+```
+
+**保留 ID**（不可用于 listen/target/center 的 id）:
+
+| ID | 在 `from` 中 | 在 `to` 中 |
+|------|------|------|
+| `system` | 本地剪贴板变更 | 设置本地剪贴板 |
+| `http` | 通过 HTTP 接收的消息 | — |
+
+- 所有规则都会被匹配，目标自动去重
+- `center` 仅对 MQTT 目标生效，HTTP 目标始终发送完整内容
+- 同一 broker+credentials 的 MQTT 连接自动共享复用
 
 ## 消息格式
 
@@ -77,171 +215,56 @@ LOCAL_SERVER_PORT=:9144
 
 ```json
 {
-    "time": 1757312216.368652,
+    "time": 1757312216.368,
     "uuid": "2ed24be9-953d-47c4-91c5-ec38559bb848",
-    "deviceName": "22081212C",
+    "deviceName": "my-device",
     "mime": "text/plain",
     "type": "text",
-    "content": "MjU2MTM0NTMzMw==",
-    "sendTime": 1757312216.575504
+    "content": "SGVsbG8gV29ybGQ=",
+    "sendTime": 1757312216.575
 }
 ```
 
-| 字段 | 说明 |
-|------|------|
-| `time` | 本地时间戳（Unix seconds） |
-| `uuid` | 消息唯一标识 |
-| `deviceName` | 设备名称（来自 `CLIPBOARD_DEVICE_NAME`） |
-| `mime` | MIME 类型 |
-| `type` | 内容类型（text/image） |
-| `content` | Base64 编码的内容 |
-| `sendTime` | 发送时间（Unix seconds） |
-| `forwardSource` | 转发来源设备名称（仅转发消息存在） |
-
-### 运行
-
-```bash
-# 正常模式（监听剪贴板变化并同步）
-./clipboard-sync
-
-# 查看版本信息
-./clipboard-sync --version
-./clipboard-sync -v
-
-# 指定配置文件
-./clipboard-sync -env-file /path/to/config.env
-
-# 测试模式（直接写入剪贴板并触发同步）
-./clipboard-sync --received-write-text "Hello World"
-./clipboard-sync --received-image-file /path/to/image.png
-```
-
-## URL 格式
-
-### MQTT URL
+V2 中继消息的 `type` 为 `text-v2` 或 `image-v2`，`content` 为引��格式：
 
 ```
-mqtt[s]://[username:[password]@]host[:port]/topic[?query_params]
+deviceName/msgId,centerId:home,sha1:abc123def456,length:12345,encoding:base64
 ```
 
-**Query 参数:**
+`encoding` 字段说明中心存储的编码方式：`base64`（默认）或 `raw`（原始内容）。
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `clientId` | MQTT 客户端 ID | `clipboard-sync-{hash}` |
-| `connectTimeout` | 连接超时(秒) | 3 |
-| `keepAliveInterval` | 心跳间隔(秒) | 60 |
-| `automaticReconnect` | 自动重连 | true |
-| `reconnectInterval` | 重连间隔(秒) | 5 |
-| `qos` | QoS等级(0或1) | 1 |
-| `retain` | 是否保留消息(retain) | true |
-| `types` | 允许的内容类型(逗号分隔) | (空=允许全部) |
-| `allowInterfaceIps` | 允许的本地网卡IP段 | (空=允许全部) |
-| `denyInterfaceIps` | 排除的本地网卡IP段 | (空=不排除) |
-| `retries` | 发布失败重试次数 | 1 |
-| `retryDelay` | 重试延迟时间(毫秒) | 50 |
+### V2 中继协议
 
-**Topic 占位符 `{$type}`**:
-- `text/plain` → `text`
-- `image/png` → `image`
+**发送端**（当 center 配置且内容为图片或文本 > 10KB）：
+1. PUT 数据到中心: `PUT {centerURL}/client/{deviceName}/{msgId}`
+2. 发送 MQTT 引用消息: type=`text-v2`/`image-v2`
 
-示例: `mqtt://host:1883/linux-clipboard/{$type}` → `linux-clipboard/text` 或 `linux-clipboard/image`
-
-### HTTP URL
-
-直接使用标准 HTTP POST URL，JSON 格式发送。
-
-**Query 参数:**
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `types` | 允许的内容类型(逗号分隔) | (空=允许全部) |
-| `allowInterfaceIps` | 允许的本地网卡IP段 | (空=允许全部) |
-| `denyInterfaceIps` | 排除的本地网卡IP段 | (空=不排除) |
-| `retries` | 请求失败重试次数 | 0（不重试） |
-| `retryDelay` | 重试延迟时间(毫秒) | 50 |
-
-## 网络接口过滤
-
-### IP 网段过滤
-
-支持通过 `allowInterfaceIps` 和 `denyInterfaceIps` 参数限制只在特定网段下同步：
-
-```bash
-# 只在本地IP符合 192.168.1.0/24 网段时启用
-mqtt://host:1883/topic?allowInterfaceIps=192.168.1.0/24
-
-# 只同步文本到 MQTT，图片和文本都同步到 HTTP
-mqtt://host:1883/topic?types=text;http://host:18884/update?types=text,image
-
-# 排除 Docker 网段
-mqtt://host:1883/topic?denyInterfaceIps=172.17.0.0/16
-
-# allow 和 deny 同时使用（deny 优先）
-mqtt://host:1883/topic?allowInterfaceIps=10.0.0.0/8&denyInterfaceIps=10.0.0.0/24
-```
-
-### 网卡名称过滤
-
-支持通过环境变量 `CLIPBOARD_ALLOWED_INTERFACE_PATTERNS` 限制只使用特定网卡（支持通配符 `*`）：
-
-```bash
-# Linux 默认
-CLIPBOARD_ALLOWED_INTERFACE_PATTERNS=eth*,enp*,wlp*
-
-# Windows 默认
-CLIPBOARD_ALLOWED_INTERFACE_PATTERNS=以太网*,Wi-Fi*,本地连接*,WLAN*,Ethernet*
-
-# 自定义（所有平台通用）
-CLIPBOARD_ALLOWED_INTERFACE_PATTERNS=eth*,enp*,wlp*,以太网*
-```
-
-## 重试机制
-
-MQTT 和 HTTP 客户端均支持失败重试：
-
-```bash
-# MQTT：发布失败重试3次，每次间隔100ms
-mqtt://host:1883/topic?retries=3&retryDelay=100
-
-# HTTP：请求失败重试2次，每次间隔200ms
-http://host:18884/update?retries=2&retryDelay=200
-```
-
-- **MQTT 默认**: 重试1次，间隔50ms
-- **HTTP 默认**: 不重试
-
-## 优雅停机
-
-程序支持接收 SIGTERM/SIGINT 信号平滑退出：
-
-```bash
-# 启动后按 Ctrl+C 或 kill 会优雅关闭所有 MQTT 连接
-./clipboard-sync
-```
-
-退出时会自动关闭所有 MQTT 连接，确保消息发送完成。
+**接收端**：
+1. 解析引用获取 clientId/msgId 和 centerId
+2. GET 实际内容: `GET {centerURL}/client/{clientId}/{msgId}`
+3. 设置本地剪贴板
 
 ## 项目结构
 
 ```
 .
-├── main.go           # 主程序入口，剪贴板变化处理
-├── version.go        # 版本信息
-├── type.go           # 数据结构定义
-├── sync.go           # 同步逻辑（MQTT/HTTP）
-├── mqtt_client.go     # MQTT 客户端和连接池
-├── http_client.go     # HTTP 客户端（含重试机制）
-├── network.go        # 网络接口监控
-├── server.go         # 本地 HTTP 服务器
-├── helper.go         # 辅助函数
-├── clip_linux.go     # Linux 剪贴板实现
-├── clip_windows.go   # Windows 剪贴板实现
-├── build_linux.sh    # Linux 构建脚本
-├── build_windows.sh   # Windows 交叉编译脚本
-├── test_mqtt.sh      # MQTT 测试脚本
-└── docs/
-    └── testing.md    # 测试指南
+├── main.go              # 主程序入口、子命令处理
+├── config.go            # YAML 配置加载和校验
+├── type.go              # 数据结构和 V2 协议
+├── forward_engine.go    # 转发规则引擎
+├── mqtt_client.go       # MQTT 连接池和订阅
+├── http_client.go       # HTTP 客户端
+├── relay.go             # V2 中继逻辑（PUT/GET 中心）
+├── server.go            # 本地 HTTP 接收服务器
+├── sync.go              # 同步辅助函数
+├── network.go           # 网络接口监控
+├── helper.go            # 工具函数
+├── clip_linux.go        # Linux 剪贴板实现
+├── clip_darwin.go       # macOS 剪贴板实现
+├── clip_windows.go      # Windows 剪贴板实现
+├── config-example.yaml  # 示例配置文件
+└── tests/
+    └── integration/     # 集成测试
 ```
 
 ## License

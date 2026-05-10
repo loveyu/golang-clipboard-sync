@@ -35,6 +35,7 @@ remoteConfig: ""
 #     token: "change-me-to-secure-token"  # Bearer token 认证
 #     textMsgId: "clipboard-text"         # 文本消息ID (预定义，非UUID)
 #     imageMsgId: "clipboard-image"       # 图片消息ID (预定义，非UUID)
+#     rawContent: false                   # 存储编码: false=Base64(默认), true=原始内容
 #     # certificate: "home-ca"            # HTTPS时引用证书ID
 
 # MQTT 订阅入口 (用于接收其他设备的剪贴板内容)
@@ -69,16 +70,24 @@ remoteConfig: ""
 #     dsn: "http://192.168.1.100:9144/update-clipboard"
 
 # 转发规则
-# from: 消息来源ID数组 ("system" = 本地剪贴板, 或 listen 条目ID)
-# to: 目标ID数组 ("system" = 设置本地剪贴板, 或 target 条目ID)
-# center: 可选，引用 center ID。配置后启用 V2 中继协议
+# 保留ID (不能用于 listen/target/center 的 id):
+#   "system"  - 本地剪贴板 (from 表示本地剪贴板变更, to 表示设置本地剪贴板)
+#   "http"    - HTTP接收端点 (from 表示通过 /update-clipboard 接收的消息)
+#
+# from: 消息来源ID数组 ("system", "http", 或 listen 条目ID)
+# to: 目标ID数组 ("system", 或 target 条目ID)
+# center: 可选，引用 center ID。配置后启用 V2 中继协议 (仅MQTT目标生效，HTTP目标直接发送完整内容)
 # 所有规则都会被匹配，目标会自动去重
 # forward:
-#   # 本地剪贴板变更 -> 发布到MQTT目标
+#   # 本地剪贴板变更 -> 发布到MQTT目标 (使用V2中继)
 #   - from: ["system"]
 #     to: ["home-pub", "mobile-pub"]
 #     center: "home"
 #   # 从MQTT接收 -> 设置本地剪贴板
 #   - from: ["home-recv", "mobile-recv"]
 #     to: ["system"]
+#     center: "home"
+#   # 从HTTP接收 -> 设置本地剪贴板并转发到MQTT目标
+#   - from: ["http"]
+#     to: ["system", "home-pub"]
 #     center: "home"
