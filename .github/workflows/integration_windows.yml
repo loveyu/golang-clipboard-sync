@@ -24,8 +24,14 @@ jobs:
       - name: Install Mosquitto
         shell: powershell
         run: |
-          choco install mosquitto --no-progress -y
-          # Stop the auto-started service so the test script can start it with custom config
+          $version = "2.0.21"
+          $installer = "$env:TEMP\mosquitto-setup.exe"
+          Invoke-WebRequest `
+            -Uri "https://github.com/eclipse/mosquitto/releases/download/v$version/mosquitto-$version-install-windows-x64.exe" `
+            -OutFile $installer -UseBasicParsing
+          Start-Process -FilePath $installer -ArgumentList "/S" -Wait
+          Start-Sleep -Seconds 5
+          # Stop the auto-started service so our test script can start it with custom config
           Stop-Service -Name "mosquitto" -Force -ErrorAction SilentlyContinue
 
       - name: Add Mosquitto to PATH
