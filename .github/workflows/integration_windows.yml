@@ -24,10 +24,18 @@ jobs:
       - name: Install Mosquitto
         shell: powershell
         run: |
-          $version = "2.0.21"
+          # Get the latest mosquitto release from GitHub API and download the Windows installer
+          $release = Invoke-RestMethod "https://api.github.com/repos/eclipse/mosquitto/releases/latest"
+          $tag = $release.tag_name          # e.g. v2.0.20
+          $version = $tag.TrimStart('v')
           $installer = "$env:TEMP\mosquitto-setup.exe"
-          curl.exe -L --retry 3 --retry-delay 5 -o $installer `
-            "https://github.com/eclipse/mosquitto/releases/download/v$version/mosquitto-$version-install-windows-x64.exe"
+          $url = "https://mosquitto.org/files/binary/win64/mosquitto-$version-install-windows-x64.exe"
+          Write-Host "Downloading mosquitto $version from $url"
+          curl.exe -L --retry 3 --retry-delay 5 -o $installer $url
+          if ((Get-Item $installer).Length -lt 100000) {
+            Write-Error "Downloaded file is too small – wrong URL or version ($version)"
+            exit 1
+          }
           Start-Process -FilePath $installer -ArgumentList "/S" -Wait
           Start-Sleep -Seconds 5
           # Stop the auto-started service so our test script can start it with custom config
