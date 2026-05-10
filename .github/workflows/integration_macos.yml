@@ -1,0 +1,55 @@
+name: Integration Tests (macOS)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  integration-macos:
+    name: Integration Tests (darwin)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Cache Homebrew downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew/downloads
+          key: brew-${{ runner.os }}-mosquitto-${{ hashFiles('.github/workflows/integration_macos.yml') }}
+          restore-keys: brew-${{ runner.os }}-mosquitto-
+
+      - name: Install dependencies
+        run: |
+          brew install mosquitto
+
+      - name: Build
+        run: |
+          CGO_ENABLED=0 go build -o tests/integration/build/clipboard-sync .
+
+      - name: Run integration tests
+        run: |
+          chmod +x tests/integration/run_tests.sh
+          ./tests/integration/run_tests.sh
+        env:
+          CI: true
+          CLIPBOARD_ENV: darwin
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-darwin
+          path: |
+            tests/integration/results/
+            tests/integration/*.log
+          retention-days: 7

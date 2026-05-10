@@ -17,7 +17,7 @@ APP_PORT=9144
 DEVICE_NAME="test-device"
 TEST_TOKEN="test-integration-token"
 
-# Clipboard environment: "x11" (default) or "wayland"
+# Clipboard environment: "x11" (default), "wayland", or "darwin"
 CLIPBOARD_ENV="${CLIPBOARD_ENV:-x11}"
 
 RED='\033[0;31m'
@@ -34,9 +34,12 @@ log_fail() { echo -e "  ${RED}[FAIL]${NC} $1"; ((fail++)); }
 log_skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1"; ((skip++)); }
 log_info() { echo -e "         $1"; }
 
+MQTT_PID=""
+
 cleanup() {
-    jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
+    jobs -p 2>/dev/null | xargs kill 2>/dev/null || true
     docker rm -f mosquitto-test 2>/dev/null || true
+    [ -n "${MQTT_PID}" ] && kill "${MQTT_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -71,23 +74,32 @@ log_info "Test image: $(wc -c < "${RESULT_DIR}/test_image.png") bytes"
 
 # Start Mosquitto
 echo "Starting Mosquitto..."
-docker rm -f mosquitto-test 2>/dev/null || true
 mkdir -p /tmp/mosquitto-test
 cat > /tmp/mosquitto-test/mosquitto.conf <<EOF
-listener 1883
+listener ${MQTT_PORT}
 allow_anonymous true
 EOF
-docker run -d --name mosquitto-test -p ${MQTT_PORT}:1883 \
-    -v /tmp/mosquitto-test/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro \
-    eclipse-mosquitto:2
-
-# Wait for Mosquitto
-for i in $(seq 1 20); do
-    if docker exec mosquitto-test mosquitto_pub -h localhost -p 1883 -t "test" -m "ping" 2>/dev/null; then
-        break
-    fi
-    sleep 0.5
-done
+if command -v docker >/dev/null 2>&1; then
+    docker rm -f mosquitto-test 2>/dev/null || true
+    docker run -d --name mosquitto-test -p ${MQTT_PORT}:1883 \
+        -v /tmp/mosquitto-test/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro \
+        eclipse-mosquitto:2
+    for i in $(seq 1 20); do
+        if docker exec mosquitto-test mosquitto_pub -h localhost -p 1883 -t "test" -m "ping" 2>/dev/null; then
+            break
+        fi
+        sleep 0.5
+    done
+else
+    mosquitto -c /tmp/mosquitto-test/mosquitto.conf &
+    MQTT_PID=$!
+    for i in $(seq 1 20); do
+        if mosquitto_pub -h localhost -p ${MQTT_PORT} -t "test" -m "ping" 2>/dev/null; then
+            break
+        fi
+        sleep 0.5
+    done
+fi
 
 # Install mosquitto-clients if needed
 if ! command -v mosquitto_pub >/dev/null 2>&1; then
@@ -140,16 +152,18 @@ reset_mock() {
 check_clipboard_env() {
     if [ "$CLIPBOARD_ENV" = "wayland" ]; then
         command -v wl-paste >/dev/null 2>&1 && command -v wl-copy >/dev/null 2>&1
+    elif [ "$CLIPBOARD_ENV" = "darwin" ]; then
+        command -v pbcopy >/dev/null 2>&1 && command -v pbpaste >/dev/null 2>&1
     else
         command -v xvfb-run >/dev/null 2>&1 && command -v xclip >/dev/null 2>&1
     fi
 }
 
 # Run a command with the appropriate clipboard environment wrapper.
-# Wayland: runs directly (compositor must already be running in the shell env).
+# Wayland/darwin: runs directly (compositor or native clipboard already available).
 # X11: wraps with xvfb-run to provide a virtual display.
 run_with_clipboard() {
-    if [ "$CLIPBOARD_ENV" = "wayland" ]; then
+    if [ "$CLIPBOARD_ENV" = "wayland" ] || [ "$CLIPBOARD_ENV" = "darwin" ]; then
         "$@"
     else
         xvfb-run -a "$@"
@@ -395,7 +409,7 @@ test_mqtt_receive_v1() {
     echo "--- Test 6: MQTT receive -> HTTP forward ---"
 
     if ! check_clipboard_env; then
-        log_skip "requires clipboard env tools (x11: xvfb-run+xclip, wayland: wl-paste+wl-copy)"
+        log_skip "requires clipboard env tools (x11: xvfb-run+xclip, wayland: wl-paste+wl-copy, darwin: pbcopy+pbpaste)"
         return
     fi
 
@@ -460,7 +474,7 @@ test_echo_prevention() {
     echo "--- Test 7: Echo prevention ---"
 
     if ! check_clipboard_env; then
-        log_skip "requires clipboard env tools (x11: xvfb-run+xclip, wayland: wl-paste+wl-copy)"
+        log_skip "requires clipboard env tools (x11: xvfb-run+xclip, wayland: wl-paste+wl-copy, darwin: pbcopy+pbpaste)"
         return
     fi
 
@@ -523,7 +537,7 @@ test_mqtt_receive_v2() {
     echo "--- Test 8: V2 receive via MQTT + Center ---"
 
     if ! check_clipboard_env; then
-        log_skip "requires clipboard env tools (x11: xvfb-run+xclip, wayland: wl-paste+wl-copy)"
+        log_skip "requires clipboard env tools (x11: xvfb-run+xclip, wayland: wl-paste+wl-copy, darwin: pbcopy+pbpaste)"
         return
     fi
 
