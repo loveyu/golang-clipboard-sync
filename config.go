@@ -56,7 +56,7 @@ type Center struct {
 	TextMsgID   string `yaml:"textMsgId"`
 	ImageMsgID  string `yaml:"imageMsgId"`
 	Certificate string `yaml:"certificate"` // references Certificate.ID
-	RawContent  bool   `yaml:"rawContent"`  // false=store base64 (default), true=store raw bytes
+	Encoding    string `yaml:"encoding"`    // "base64" (default) or "raw"
 }
 
 type ListenEntry struct {

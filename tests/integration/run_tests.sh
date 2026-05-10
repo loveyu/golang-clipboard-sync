@@ -264,7 +264,7 @@ EOF
             log_fail "Center PUT not found"
         fi
 
-        # Verify center content (should be base64 since rawContent=false)
+        # Verify center content (should be base64 since encoding=base64)
         local center_data=$(curl -sf -H "Authorization: Bearer ${TEST_TOKEN}" "http://localhost:${CENTER_PORT}/client/${DEVICE_NAME}/clipboard-text")
         if [ -n "$center_data" ]; then
             log_info "Center content: $(echo -n "$center_data" | wc -c) bytes"

@@ -1,37 +1,39 @@
 # clipboard-sync
 
-跨平台剪贴板同步工具，通过 YAML 配置文件灵活管理 MQTT、HTTP 多协议同步。
+[English](README.md) | [中文](README_CN.md)
 
-## 功能特性
+Cross-platform clipboard synchronization tool with flexible MQTT and HTTP multi-protocol support via YAML configuration.
 
-- **YAML 配置**: 统一的配置文件管理所有参数，支持远程配置下载
-- **多协议支持**: MQTT（发布/订阅）和 HTTP（推送）协议
-- **跨平台**: Linux（X11/Wayland）、macOS、Windows
-- **转发规则引擎**: 灵活的消息路由，支持多源多目标、自动去重
-- **V2 中继协议**: 大文件通过 HTTP 中心服务器中继，MQTT 仅传输引用
-- **证书支持**: 自定义 CA、mTLS 客户端证书
-- **网络过滤**: 根据本地 IP 网段和网卡名称过滤
-- **连接池**: MQTT 连接按 broker+credentials 共享复用
-- **自动重启**: 监听进程异常退出后指数退避重启
+## Features
 
-## 快速开始
+- **YAML Configuration**: Unified config file for all parameters, supports remote config download
+- **Multi-protocol**: MQTT (pub/sub) and HTTP (push) protocols
+- **Cross-platform**: Linux (X11/Wayland), macOS, Windows
+- **Forward Engine**: Flexible message routing with multi-source/multi-target and automatic deduplication
+- **V2 Relay Protocol**: Large files relayed via HTTP center server; MQTT only transmits a reference
+- **Certificate Support**: Custom CA and mTLS client certificates
+- **Network Filtering**: Filter by local IP subnet or interface name patterns
+- **Connection Pooling**: MQTT connections shared by broker+credentials
+- **Auto-restart**: Exponential back-off restart after listener exits
 
-### 环境要求
+## Quick Start
+
+### Requirements
 
 - Go 1.24+
-- Linux: xclip/xsel（X11）或 wl-clipboard（Wayland）
-- macOS: pbcopy/pbpaste、osascript（系统自带）
-- Windows: 无特殊依赖
+- Linux: xclip/xsel (X11) or wl-clipboard (Wayland)
+- macOS: pbcopy/pbpaste, osascript (bundled with macOS)
+- Windows: no extra dependencies
 
-### 构建
+### Build
 
 ```bash
 go build -o clipboard-sync .
 ```
 
-### 配置
+### Configuration
 
-创建 `config.yaml` 配置文件（参考 `config-example.yaml`）：
+Create `config.yaml` (refer to `config-example.yaml`):
 
 ```yaml
 device:
@@ -53,115 +55,113 @@ forward:
     to: ["mqtt-pub"]
 ```
 
-### 运行
+### Run
 
 ```bash
-# 启动服务（默认命令）
+# Start (default command)
 ./clipboard-sync
 
-# 指定配置文件
+# Specify config file
 ./clipboard-sync -config /path/to/config.yaml
 
-# 远程下载配置
+# Download remote config
 ./clipboard-sync download-config
 
-# 查看版本
+# Print version
 ./clipboard-sync version
 
-# 测试模式（直接写入剪贴板并触发同步）
+# Test mode: write to clipboard and trigger sync
 ./clipboard-sync --received-write-text "Hello World"
 ./clipboard-sync --received-image-file /path/to/image.png
 ```
 
-### 环境变量
+### Environment Variables
 
-仅保留两个环境变量：
+| Variable | Description |
+|----------|-------------|
+| `CLIPBOARD_CONFIG_PATH` | Config file path, default `config.yaml` |
+| `CLIPBOARD_DEBUG` | Debug mode, set to `1` to enable |
+| `REMOTE_CONFIG_URL` | Remote config URL (for `download-config` command) |
 
-| 变量 | 说明 |
-|------|------|
-| `CLIPBOARD_CONFIG_PATH` | 配置文件路径，默认 `config.yaml` |
-| `CLIPBOARD_DEBUG` | 调试模式，设为 `1` 启用 |
-| `REMOTE_CONFIG_URL` | 远程配置下载 URL（用于 `download-config` 命令） |
+## Configuration Reference
 
-## 配置详解
-
-### device - 设备配置
+### device
 
 ```yaml
 device:
-  name: "my-notebook"                   # 设备名称，留空则使用主机名
-  allowedInterfacePatterns: "eth*,enp*" # 网卡名称过滤（通配符）
-  maxRuntime: 3600                      # 监听器最大运行时间(秒)
+  name: "my-notebook"                   # Device name; uses hostname if empty
+  allowedInterfacePatterns: "eth*,enp*" # Interface name filter (wildcards)
+  maxRuntime: 3600                      # Max listener runtime in seconds before auto-restart
 ```
 
-### http - 本地 HTTP 服务器
+### http — Local HTTP Server
 
 ```yaml
 http:
-  port: ":9144"   # 监听端口
+  port: ":9144"   # Listen port
 ```
 
-本地 HTTP 服务器接收 `/update-clipboard` 端点的消息，接收到的消息以 `"http"` 作为来源 ID 进入转发规则。
+The local HTTP server accepts messages at `/update-clipboard`. Received messages enter the forward rules with source ID `"http"`.
 
-### certificates - 证书配置
+### certificates
 
 ```yaml
 certificates:
   - id: "home-ca"
-    ca: "/path/to/ca.crt"               # CA 证书
+    ca: "/path/to/ca.crt"               # CA certificate
   - id: "mtls"
     ca: "/path/to/ca.crt"
-    cert: "/path/to/client.crt"         # 客户端证书 (mTLS)
-    key: "/path/to/client.key"          # 客户端密钥 (mTLS)
+    cert: "/path/to/client.crt"         # Client certificate (mTLS)
+    key: "/path/to/client.key"          # Client key (mTLS)
 ```
 
-被 `centers` 和 MQTT DSN 的 `certificate` 参数引用。
+Referenced by `centers` and by the `certificate` DSN parameter.
 
-### centers - 剪贴板中心
+### centers — Clipboard Center
 
 ```yaml
 centers:
   - id: "home"
-    url: "http://10.0.0.1:8080"         # 中心 HTTP 地址
-    token: "secure-token"               # Bearer token 认证
-    textMsgId: "clipboard-text"         # 文本消息 ID
-    imageMsgId: "clipboard-image"       # 图片消息 ID
-    rawContent: false                   # 存储编码: false=Base64(默认), true=原始内容
-    # certificate: "home-ca"            # HTTPS 时引用证书
+    url: "http://10.0.0.1:8080"         # Center HTTP address
+    token: "secure-token"               # Bearer token authentication
+    textMsgId: "clipboard-text"         # Text message ID
+    imageMsgId: "clipboard-image"       # Image message ID
+    encoding: base64                    # Storage encoding: base64 (default) or raw
+    # certificate: "home-ca"            # Reference certificate for HTTPS
 ```
 
-中心服务器用于 V2 中继协议。当转发规则配置了 `center` 时，图片或超过 10KB 的文本会先 PUT 到中心，再通过 MQTT 发送引用。
+The center server is used by the V2 relay protocol. When a forward rule has a `center`, images or text > 10 KB are PUT to the center first, then an MQTT reference is sent.
 
-- `rawContent: false`（默认）: 中心存储 Base64 编码的内容，Content-Type 保持原始类型
-- `rawContent: true`: 中心存储原始内容，便于外部直接预览
+- `encoding: base64` (default): Center stores Base64-encoded content; Content-Type stays unchanged
+- `encoding: raw`: Center stores raw bytes, convenient for external preview
 
-### listen - MQTT 订阅入口
+### listen — MQTT Subscription
 
 ```yaml
 listen:
   - id: "home-recv"
     dsn: "mqtt://user:pass@10.0.0.1:1883/clipboard/{$type}/+?maxMessageSize=5MB"
-    allowInterfaceIps: "10.0.0.0/24"    # IP 网段过滤（可选）
+    allowInterfaceIps: "10.0.0.0/24"    # IP subnet filter (optional)
 ```
 
-DSN 格式: `mqtt[s]://[user:pass@]host:port/topic[?params]`
+DSN format: `mqtt[s]://[user:pass@]host:port/topic[?params]`
 
-`{$type}` 在订阅时自动替换为 MQTT 通配符 `+`。
+`{$type}` is replaced with the MQTT wildcard `+` when subscribing.
 
-支持的参数:
+Supported DSN parameters:
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `maxMessageSize` | 最大消息大小（如 `5MB`、`512KB`） | 无限制 |
-| `certificate` | 引用 certificates 中的 ID | 无 |
-| `clientId` | MQTT 客户端 ID | 自动生成 |
-| `connectTimeout` | 连接超时(秒) | 3 |
-| `keepAliveInterval` | 心跳间隔(秒) | 60 |
-| `automaticReconnect` | 自动重连 | true |
-| `qos` | QoS 等级 (0/1/2) | 1 |
-| `retain` | 保留消息 | true |
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `maxMessageSize` | Max message size (e.g. `5MB`, `512KB`) | unlimited |
+| `certificate` | References a certificate ID | — |
+| `clientId` | MQTT client ID | auto-generated |
+| `connectTimeout` | Connection timeout (s) | 3 |
+| `keepAliveInterval` | Keep-alive interval (s) | 60 |
+| `automaticReconnect` | Auto-reconnect | true |
+| `qos` | QoS level (0/1/2) | 1 |
+| `retain` | Retain messages | true |
 
-### targets - 发布目标
+### targets — Publish Targets
 
 ```yaml
 targets:
@@ -172,23 +172,23 @@ targets:
     dsn: "http://10.0.0.1:9144/update-clipboard"
 ```
 
-支持 MQTT 和 HTTP 两种协议。`{$type}` 在发布时替换为 `text` 或 `image`。
+Supports MQTT and HTTP. `{$type}` is replaced with `text` or `image` when publishing.
 
-HTTP 目标额外参数:
+HTTP target extra parameters:
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `types` | 允许的内容类型 | 全部 |
-| `retries` | 失败重试次数 | 0 |
-| `retryDelay` | 重试延迟(ms) | 50 |
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `types` | Allowed content types | all |
+| `retries` | Retry attempts on failure | 0 |
+| `retryDelay` | Retry delay (ms) | 50 |
 
-### forward - 转发规则
+### forward — Forward Rules
 
 ```yaml
 forward:
   - from: ["system"]
     to: ["mqtt-pub"]
-    center: "home"        # 可选，启用 V2 中继
+    center: "home"        # Optional: enable V2 relay
 
   - from: ["home-recv"]
     to: ["system"]
@@ -198,20 +198,20 @@ forward:
     to: ["system", "mqtt-pub"]
 ```
 
-**保留 ID**（不可用于 listen/target/center 的 id）:
+**Reserved IDs** (cannot be used as listen/target/center ids):
 
-| ID | 在 `from` 中 | 在 `to` 中 |
-|------|------|------|
-| `system` | 本地剪贴板变更 | 设置本地剪贴板 |
-| `http` | 通过 HTTP 接收的消息 | — |
+| ID | As `from` | As `to` |
+|----|-----------|---------|
+| `system` | Local clipboard change | Write to local clipboard |
+| `http` | Message received via HTTP | — |
 
-- 所有规则都会被匹配，目标自动去重
-- `center` 仅对 MQTT 目标生效，HTTP 目标始终发送完整内容
-- 同一 broker+credentials 的 MQTT 连接自动共享复用
+- All rules are evaluated; destinations are deduplicated automatically
+- `center` only applies to MQTT targets; HTTP targets always send full content
+- MQTT connections to the same broker+credentials are automatically shared
 
-## 消息格式
+## Message Format
 
-同步消息为 JSON 格式：
+Sync messages are JSON:
 
 ```json
 {
@@ -225,48 +225,49 @@ forward:
 }
 ```
 
-V2 中继消息的 `type` 为 `text-v2` 或 `image-v2`，`content` 为引��格式：
+V2 relay messages have `type` of `text-v2` or `image-v2`, and `content` is a reference string:
 
 ```
 deviceName/msgId,centerId:home,sha1:abc123def456,length:12345,encoding:base64
 ```
 
-`encoding` 字段说明中心存储的编码方式：`base64`（默认）或 `raw`（原始内容）。
+The `encoding` field indicates how the center stores the content: `base64` (default) or `raw`.
 
-### V2 中继协议
+### V2 Relay Protocol
 
-**发送端**（当 center 配置且内容为图片或文本 > 10KB）：
-1. PUT 数据到中心: `PUT {centerURL}/client/{deviceName}/{msgId}`
-2. 发送 MQTT 引用消息: type=`text-v2`/`image-v2`
+**Sender** (when center is configured and content is an image or text > 10 KB):
+1. PUT data to center: `PUT {centerURL}/client/{deviceName}/{msgId}`
+2. Send MQTT reference message with type `text-v2`/`image-v2`
 
-**接收端**：
-1. 解析引用获取 clientId/msgId 和 centerId
-2. GET 实际内容: `GET {centerURL}/client/{clientId}/{msgId}`
-3. 设置本地剪贴板
+**Receiver**:
+1. Parse reference to get clientId/msgId and centerId
+2. GET actual content: `GET {centerURL}/client/{clientId}/{msgId}`
+3. Set local clipboard
 
-## 项目结构
+## Project Structure
 
 ```
 .
-├── main.go              # 主程序入口、子命令处理
-├── config.go            # YAML 配置加载和校验
-├── type.go              # 数据结构和 V2 协议
-├── forward_engine.go    # 转发规则引擎
-├── mqtt_client.go       # MQTT 连接池和订阅
-├── http_client.go       # HTTP 客户端
-├── relay.go             # V2 中继逻辑（PUT/GET 中心）
-├── server.go            # 本地 HTTP 接收服务器
-├── sync.go              # 同步辅助函数
-├── network.go           # 网络接口监控
-├── helper.go            # 工具函数
-├── clip_linux.go        # Linux 剪贴板实现
-├── clip_darwin.go       # macOS 剪贴板实现
-├── clip_windows.go      # Windows 剪贴板实现
-├── config-example.yaml  # 示例配置文件
+├── main.go              # Entry point, sub-command handling
+├── config.go            # YAML config loading and validation
+├── type.go              # Data structures and V2 protocol
+├── forward_engine.go    # Forward rules engine
+├── mqtt_client.go       # MQTT connection pool and subscriptions
+├── http_client.go       # HTTP client
+├── relay.go             # V2 relay logic (PUT/GET center)
+├── server.go            # Local HTTP receive server
+├── sync.go              # Sync helper functions
+├── network.go           # Network interface monitoring
+├── helper.go            # Utility functions
+├── clip_linux.go        # Linux clipboard implementation
+├── clip_darwin.go       # macOS clipboard implementation
+├── clip_windows.go      # Windows clipboard implementation
+├── config-example.yaml  # Example configuration file
 └── tests/
-    └── integration/     # 集成测试
+    └── integration/     # Integration tests
 ```
 
 ## License
 
-Apache License 2.0 - see [LICENSE](LICENSE) file for details.
+Apache License 2.0 — see [LICENSE](LICENSE) for details.
+
