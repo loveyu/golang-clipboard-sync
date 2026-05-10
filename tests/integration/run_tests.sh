@@ -63,7 +63,7 @@ CGO_ENABLED=0 go build -o "${BINARY}" . || { echo "Build failed"; exit 1; }
 
 # Generate test image (small PNG)
 python3 -c "
-import struct, zlib
+import struct, zlib, sys
 def create_png(w, h):
     def chunk(t, d):
         c = t + d
@@ -74,9 +74,8 @@ def create_png(w, h):
     return b'\x89PNG\r\n\x1a\n' + \
         chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + \
         chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
-with open('${RESULT_DIR}/test_image.png', 'wb') as f:
-    f.write(create_png(64, 64))
-"
+sys.stdout.buffer.write(create_png(64, 64))
+" > "${RESULT_DIR}/test_image.png"
 log_info "Test image: $(wc -c < "${RESULT_DIR}/test_image.png") bytes"
 
 # Start Mosquitto
