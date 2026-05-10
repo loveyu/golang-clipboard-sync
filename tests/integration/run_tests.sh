@@ -138,12 +138,16 @@ start_subscriber() {
 
 # Reset mock server state
 reset_mock() {
-    # Restart mock server to reset state
     kill ${MOCK_PID} 2>/dev/null || true
     wait ${MOCK_PID} 2>/dev/null || true
     python3 "${SCRIPT_DIR}/mock_server.py" ${CENTER_PORT} ${CAPTURE_PORT} &
     MOCK_PID=$!
-    sleep 1
+    for i in $(seq 1 20); do
+        if curl -sf http://localhost:${CENTER_PORT}/_stats >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
 }
 
 # ======================== Clipboard env helpers ========================
