@@ -16,4 +16,5 @@ require (
 	golang.org/x/mobile v0.0.0-20230301163155-e0f57694e12c // indirect
 	golang.org/x/net v0.23.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

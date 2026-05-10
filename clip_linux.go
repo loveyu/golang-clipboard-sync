@@ -23,7 +23,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -33,12 +32,36 @@ var (
 	isX11     = os.Getenv("XDG_SESSION_TYPE") == "x11" || os.Getenv("DISPLAY") != ""
 )
 
-const (
-	defaultMaxRuntime = 3600 // 默认最大运行时间（秒）
-	envMaxRuntime     = "CLIPBOARD_MAX_RUNTIME"
-)
+const defaultMaxRuntime = 3600 // 默认最大运行时间（秒）
 
 func initClipboard() {
+	// Check required tools
+	var missing []string
+	if isWayland {
+		if !commandExists("wl-paste") {
+			missing = append(missing, "wl-paste")
+		}
+		if !commandExists("wl-copy") {
+			missing = append(missing, "wl-copy")
+		}
+	} else {
+		// X11 or unknown (default to X11)
+		if !commandExists("xclip") {
+			missing = append(missing, "xclip")
+		}
+		if !commandExists("xsel") {
+			missing = append(missing, "xsel")
+		}
+	}
+
+	if len(missing) > 0 {
+		msg := fmt.Sprintf("缺少必需程序: %s\n\nWayland 需要: wl-paste, wl-copy\nX11 需要: xclip, xsel",
+			strings.Join(missing, ", "))
+		log.Printf("[ERROR] %s", msg)
+		showErrorDialog("clipboard-sync - 环境检查失败", msg)
+		log.Fatalf("Exiting: missing required programs: %s", strings.Join(missing, ", "))
+	}
+
 	if isWayland {
 		log.Println("Linux剪贴板初始化 (Wayland)")
 	} else if isX11 {
@@ -48,18 +71,35 @@ func initClipboard() {
 	}
 }
 
-// getMaxRuntime 读取最大运行时间配置
+// showErrorDialog shows a graphical error dialog on Linux.
+// Tries zenity (GNOME), kdialog (KDE), then xmessage (fallback).
+func showErrorDialog(title, message string) {
+	type dialogCmd struct {
+		name string
+		args []string
+	}
+
+	attempts := []dialogCmd{
+		{name: "zenity", args: []string{"--error", "--title", title, "--text", message, "--no-markup"}},
+		{name: "kdialog", args: []string{"--error", message, "--title", title}},
+		{name: "xmessage", args: []string{"-center", "-title", title, message}},
+	}
+
+	for _, d := range attempts {
+		if commandExists(d.name) {
+			cmd := exec.Command(d.name, d.args...)
+			cmd.Run() // best-effort, ignore errors
+			return
+		}
+	}
+}
+
+// getMaxRuntime reads max runtime from config or uses default.
 func getMaxRuntime() time.Duration {
-	val := os.Getenv(envMaxRuntime)
-	if val == "" {
-		return time.Duration(defaultMaxRuntime) * time.Second
+	if appConfig != nil && appConfig.Device.MaxRuntime > 0 {
+		return time.Duration(appConfig.Device.MaxRuntime) * time.Second
 	}
-	seconds, err := strconv.Atoi(val)
-	if err != nil || seconds <= 0 {
-		log.Printf("[WARN] 无效的 %s 值 '%s'，使用默认值 %ds", envMaxRuntime, val, defaultMaxRuntime)
-		return time.Duration(defaultMaxRuntime) * time.Second
-	}
-	return time.Duration(seconds) * time.Second
+	return time.Duration(defaultMaxRuntime) * time.Second
 }
 
 // DetectClipboardMime 检测当前剪贴板的MIME类型（返回首选类型）

@@ -20,59 +20,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/url"
-	"strings"
 	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
-
-// MQTTClientPool 维护MQTT客户端连接池，通过URL hash作为key实现连接复用
-type MQTTClientPool struct {
-	clients map[string]mqtt.Client
-	mu      sync.RWMutex
-}
-
-var mqttPool = &MQTTClientPool{
-	clients: make(map[string]mqtt.Client),
-}
-
-// getMQTTClient 获取或创建MQTT客户端，实现连接复用
-func getMQTTClient(mqttURL string) (mqtt.Client, error) {
-	hash := hashURL(mqttURL)
-
-	mqttPool.mu.RLock()
-	client, exists := mqttPool.clients[hash]
-	mqttPool.mu.RUnlock()
-
-	if exists && client.IsConnected() {
-		return client, nil
-	}
-
-	// 需要创建新连接
-	mqttPool.mu.Lock()
-	defer mqttPool.mu.Unlock()
-
-	// 双重检查
-	if client, exists = mqttPool.clients[hash]; exists && client.IsConnected() {
-		return client, nil
-	}
-
-	client, err := createMQTTClient(mqttURL)
-	if err != nil {
-		return nil, err
-	}
-
-	mqttPool.clients[hash] = client
-	return client, nil
-}
-
-// hashURL 生成URL的hash作为连接池的key
-func hashURL(rawURL string) string {
-	hash := sha256.Sum256([]byte(rawURL))
-	return hex.EncodeToString(hash[:16]) // 使用前16字节，足够唯一
-}
 
 // MQTTConfig MQTT连接配置
 type MQTTConfig struct {
@@ -87,160 +39,81 @@ type MQTTConfig struct {
 	ReconnectInterval    int // 秒
 	ReconnectMaxInterval int // 秒
 	TLS                  bool
-	QoS                  byte   // QoS等级(0或1)
-	Retain               bool   // 是否保留消息
-	AllowInterfaceIps    string // 允许的网卡IP段，如 "192.168.1.0/24,10.0.0.0/8"
-	Retries              int    // 发布失败重试次数，默认1
-	RetryDelay           int    // 重试延迟时间(毫秒)，默认50
+	QoS                  byte
+	Retain               bool
+	AllowInterfaceIps    string
+	Retries              int
+	RetryDelay           int
 }
 
-// parseMQTTURL 解析MQTT URL
-// 格式: mqtt[s]://[username:[password]@]host[:port]/topic[?query_params]
-func parseMQTTURL(rawURL string) (*MQTTConfig, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid MQTT URL: %w", err)
-	}
-
-	if u.Scheme != "mqtt" && u.Scheme != "mqtts" {
-		return nil, fmt.Errorf("invalid scheme: %s, expected mqtt or mqtts", u.Scheme)
-	}
-
-	cfg := &MQTTConfig{
-		Broker: u.Host,
-		TLS:    u.Scheme == "mqtts",
-		Topic:  strings.TrimPrefix(u.Path, "/"),
-	}
-
-	// 解析用户名密码
-	if u.User != nil {
-		cfg.Username = u.User.Username()
-		cfg.Password, _ = u.User.Password()
-	}
-
-	// 解析query参数
-	q := u.Query()
-
-	if v := q.Get("clientId"); v != "" {
-		cfg.ClientID = v
-	} else {
-		cfg.ClientID = fmt.Sprintf("clipboard-sync-%s", hashURL(rawURL)[:8])
-	}
-
-	cfg.ConnectTimeout = 3 // 默认3秒
-	if v := q.Get("connectTimeout"); v != "" {
-		if t, err := time.ParseDuration(v + "s"); err == nil {
-			cfg.ConnectTimeout = int(t.Seconds())
-		}
-	}
-
-	cfg.KeepAliveInterval = 60 // 默认60秒
-	if v := q.Get("keepAliveInterval"); v != "" {
-		if t, err := time.ParseDuration(v + "s"); err == nil {
-			cfg.KeepAliveInterval = int(t.Seconds())
-		}
-	}
-
-	cfg.AutoReconnect = true // 默认启用
-	if v := q.Get("automaticReconnect"); v != "" {
-		cfg.AutoReconnect = v == "true"
-	}
-
-	cfg.ReconnectInterval = 5 // 默认5秒
-	if v := q.Get("reconnectInterval"); v != "" {
-		if t, err := time.ParseDuration(v + "s"); err == nil {
-			cfg.ReconnectInterval = int(t.Seconds())
-		}
-	}
-
-	cfg.ReconnectMaxInterval = 60 // 默认60秒
-	if v := q.Get("reconnectMaxInterval"); v != "" {
-		if t, err := time.ParseDuration(v + "s"); err == nil {
-			cfg.ReconnectMaxInterval = int(t.Seconds())
-		}
-	}
-
-	cfg.QoS = 1 // 默认QoS 1
-	if v := q.Get("qos"); v == "0" {
-		cfg.QoS = 0
-	}
-
-	cfg.Retain = true // 默认保留消息
-	if v := q.Get("retain"); v != "" {
-		cfg.Retain = v == "true"
-	}
-
-	// 解析 allowInterfaceIps 参数
-	cfg.AllowInterfaceIps = q.Get("allowInterfaceIps")
-
-	// 解析 retries 参数（发布失败重试次数，默认1）
-	cfg.Retries = 1
-	if v := q.Get("retries"); v != "" {
-		if r, err := fmt.Sscanf(v, "%d", &cfg.Retries); err == nil && r > 0 {
-			cfg.Retries = r
-		}
-	}
-
-	// 解析 retryDelay 参数（重试延迟时间毫秒，默认50）
-	cfg.RetryDelay = 50
-	if v := q.Get("retryDelay"); v != "" {
-		if d, err := fmt.Sscanf(v, "%d", &cfg.RetryDelay); err == nil && d > 0 {
-			cfg.RetryDelay = d
-		}
-	}
-
-	return cfg, nil
+// MQTTClientPool maintains MQTT connections shared by broker+credentials.
+type MQTTClientPool struct {
+	clients map[string]mqtt.Client
+	mu      sync.RWMutex
 }
 
-// createMQTTClient 创建MQTT客户端
-func createMQTTClient(rawURL string) (mqtt.Client, error) {
-	cfg, err := parseMQTTURL(rawURL)
+var mqttPool = &MQTTClientPool{
+	clients: make(map[string]mqtt.Client),
+}
+
+// hashURL generates a hash for use as a pool key.
+func hashURL(rawURL string) string {
+	hash := sha256.Sum256([]byte(rawURL))
+	return hex.EncodeToString(hash[:16])
+}
+
+// getMQTTClientForTarget gets or creates an MQTT client for a target entry.
+func getMQTTClientForTarget(target *TargetEntry) (mqtt.Client, error) {
+	return getOrCreateMQTTClient(target.MQTTConfig, target.Certificate)
+}
+
+// getOrCreateMQTTClient gets or creates an MQTT client using broker+credentials as key.
+func getOrCreateMQTTClient(cfg *MQTTConfig, cert *Certificate) (mqtt.Client, error) {
+	key := ConnectionPoolKey(cfg)
+
+	mqttPool.mu.RLock()
+	client, exists := mqttPool.clients[key]
+	mqttPool.mu.RUnlock()
+
+	if exists && client.IsConnected() {
+		return client, nil
+	}
+
+	mqttPool.mu.Lock()
+	defer mqttPool.mu.Unlock()
+
+	if client, exists = mqttPool.clients[key]; exists && client.IsConnected() {
+		return client, nil
+	}
+
+	client, err := createMQTTClient(cfg, cert)
 	if err != nil {
 		return nil, err
 	}
 
-	opts := mqtt.NewClientOptions()
+	mqttPool.clients[key] = client
+	return client, nil
+}
 
-	broker := cfg.Broker
-	if cfg.TLS {
-		broker = "ssl://" + broker
-	} else {
-		broker = "tcp://" + broker
-	}
+// createMQTTClient creates a new MQTT client.
+func createMQTTClient(cfg *MQTTConfig, cert *Certificate) (mqtt.Client, error) {
+	opts := BuildMQTTClientOptions(cfg, cert)
 
-	opts.AddBroker(broker)
-	opts.SetClientID(cfg.ClientID)
-	opts.SetUsername(cfg.Username)
-	opts.SetPassword(cfg.Password)
-	opts.SetConnectTimeout(time.Duration(cfg.ConnectTimeout) * time.Second)
-	opts.SetKeepAlive(time.Duration(cfg.KeepAliveInterval) * time.Second)
-	opts.SetAutoReconnect(cfg.AutoReconnect)
-	opts.SetConnectRetry(true)
-	opts.SetConnectRetryInterval(time.Duration(cfg.ReconnectInterval) * time.Second)
 	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
 		if debugClipboard {
-			log.Printf("[DEBUG] MQTT received on %s: %s", msg.Topic(), string(msg.Payload()))
+			log.Printf("[DEBUG] MQTT received on %s: %d bytes", msg.Topic(), len(msg.Payload()))
 		}
 	})
 
-	// 设置连接丢失处理
 	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
-		log.Printf("MQTT connection lost: %v", err)
-		if debugClipboard {
-			log.Printf("[DEBUG] MQTT connection lost, will auto reconnect")
-		}
+		log.Printf("MQTT connection lost (%s): %v", cfg.Broker, err)
 	})
 
-	// 设置连接成功处理
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
-		log.Printf("MQTT reconnected successfully")
-		if debugClipboard {
-			log.Printf("[DEBUG] MQTT connection established")
-		}
+		log.Printf("MQTT reconnected: %s", cfg.Broker)
+		// Re-subscribe all listen entries that use this connection
+		resubscribeForBroker(client, cfg)
 	})
-
-	// 设置CleanSession为false以支持更好的重连
-	opts.SetCleanSession(false)
 
 	client := mqtt.NewClient(opts)
 
@@ -250,139 +123,210 @@ func createMQTTClient(rawURL string) (mqtt.Client, error) {
 			return nil, fmt.Errorf("MQTT connection failed: %w", err)
 		}
 	} else {
-		return nil, fmt.Errorf("MQTT connection timeout")
+		return nil, fmt.Errorf("MQTT connection timeout: %s", cfg.Broker)
 	}
 
 	if debugClipboard {
-		log.Printf("[DEBUG] MQTT connected to %s, topic: %s", broker, cfg.Topic)
+		log.Printf("[DEBUG] MQTT connected to %s, topic: %s", cfg.GetBrokerAddress(), cfg.Topic)
 	}
 
 	return client, nil
 }
 
-// resolveTopic 解析topic中的{$type}占位符，type为mime类型的小写前缀
-func resolveTopic(topic string, mime string) string {
-	if mime == "" {
-		return topic
-	}
-	// 获取mime类型的前缀（如 "text/plain" -> "text", "image/png" -> "image"）
-	parts := strings.SplitN(mime, "/", 2)
-	contentType := strings.ToLower(parts[0])
-	return strings.ReplaceAll(topic, "{$type}", contentType)
-}
-
-// syncViaMQTT 通过MQTT发送剪贴板内容
-func syncViaMQTT(t *SyncTarget, msg ClipboardMessage) error {
-	cfg, err := parseMQTTURL(t.RawURL)
-	if err != nil {
-		return err
-	}
-
-	// 解析topic中的{$type}占位符
-	topic := resolveTopic(cfg.Topic, msg.Mime)
-
-	jsonData, err := json.Marshal(msg)
-	if err != nil {
-		if debugClipboard {
-			log.Printf("[DEBUG] MQTT JSON序列化失败: %v", err)
-		}
-		return err
-	}
-
-	if debugClipboard {
-		log.Printf("[DEBUG] MQTT发送 - Topic: %s, Type: %s, Content长度: %d",
-			topic, msg.Type, len(jsonData))
-	}
-
-	var lastErr error
-	maxAttempts := cfg.Retries + 1 // 首次 + 重试次数
-
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if attempt > 0 {
-			// 重试前延迟
-			time.Sleep(time.Duration(cfg.RetryDelay) * time.Millisecond)
-			if debugClipboard {
-				log.Printf("[DEBUG] MQTT重试发布 (attempt %d/%d)", attempt, cfg.Retries)
-			}
-		}
-
-		// 获取或创建连接
-		client, err := getMQTTClient(t.RawURL)
-		if err != nil {
-			lastErr = fmt.Errorf("failed to get MQTT client: %w", err)
-			continue
-		}
-
-		// 检查连接状态
-		if !client.IsConnected() {
-			// 等待自动重连（paho库会在后台自动重连）
-			for i := 0; i < 30; i++ { // 最多等待30秒
-				time.Sleep(time.Second)
-				if client.IsConnected() {
-					break
-				}
-			}
-			if !client.IsConnected() {
-				lastErr = fmt.Errorf("MQTT client disconnected and reconnection timeout")
-				continue
-			}
-		}
-
-		// 发布消息
-		token := client.Publish(topic, cfg.QoS, cfg.Retain, jsonData)
-		if token.WaitTimeout(10 * time.Second) {
-			if err := token.Error(); err != nil {
-				if debugClipboard {
-					log.Printf("[DEBUG] MQTT发布失败: %v", err)
-				}
-				lastErr = fmt.Errorf("MQTT publish failed: %w", err)
-
-				// 发布失败，需要重试
-				if attempt < cfg.Retries {
-					// 关闭连接并重连
-					CloseMQTTClient(t.RawURL) // 会销毁连接，下次getMQTTClient会创建新连接
-					if debugClipboard {
-						log.Printf("[DEBUG] MQTT连接已关闭，等待重连...")
-					}
-					continue
-				}
-			} else {
-				// 发布成功
-				log.Printf("MQTT published to %s: %s\n", topic, msg.Type)
-				return nil
-			}
-		} else {
-			lastErr = fmt.Errorf("MQTT publish timeout")
-			// 超时也需要重试
-			if attempt < cfg.Retries {
-				CloseMQTTClient(t.RawURL)
-				continue
-			}
-		}
-	}
-
-	return lastErr
-}
-
-// CloseMQTTClient 关闭指定URL的MQTT连接
-func CloseMQTTClient(rawURL string) {
-	hash := hashURL(rawURL)
+// closeMQTTClientByConfig closes an MQTT client by its config.
+func closeMQTTClientByConfig(cfg *MQTTConfig) {
+	key := ConnectionPoolKey(cfg)
 	mqttPool.mu.Lock()
 	defer mqttPool.mu.Unlock()
 
-	if client, exists := mqttPool.clients[hash]; exists {
+	if client, exists := mqttPool.clients[key]; exists {
 		client.Disconnect(0)
-		delete(mqttPool.clients, hash)
+		delete(mqttPool.clients, key)
 	}
 }
 
-// CloseAllMQTTClients 关闭所有MQTT连接
+// CloseAllMQTTClients closes all MQTT connections.
 func CloseAllMQTTClients() {
 	mqttPool.mu.Lock()
 	defer mqttPool.mu.Unlock()
 
-	for hash, client := range mqttPool.clients {
+	for key, client := range mqttPool.clients {
 		client.Disconnect(0)
-		delete(mqttPool.clients, hash)
+		delete(mqttPool.clients, key)
 	}
+}
+
+// SubscribeAllListeners subscribes to all listen entry topics.
+// Called at startup and on reconnection.
+func SubscribeAllListeners() {
+	if appConfig == nil {
+		return
+	}
+
+	for i := range appConfig.Listen {
+		entry := &appConfig.Listen[i]
+		cfg := entry.MQTTConfig
+		if cfg == nil {
+			continue
+		}
+
+		client, err := getOrCreateMQTTClient(cfg, entry.Certificate)
+		if err != nil {
+			log.Printf("[WARN] Failed to get MQTT client for listen %s: %v", entry.ID, err)
+			continue
+		}
+
+		subscribeTopic := cfg.SubscribeTopic()
+		if debugClipboard {
+			log.Printf("[DEBUG] Subscribing to %s (listen: %s)", subscribeTopic, entry.ID)
+		}
+
+		entryCopy := entry
+		token := client.Subscribe(subscribeTopic, cfg.QoS, func(_ mqtt.Client, msg mqtt.Message) {
+			handleMQTTMessage(entryCopy, msg.Topic(), msg.Payload())
+		})
+		token.Wait()
+		if token.Error() != nil {
+			log.Printf("[WARN] Subscribe failed for %s: %v", entry.ID, token.Error())
+		}
+	}
+}
+
+// resubscribeForBroker re-subscribes listen entries that use a specific broker connection.
+func resubscribeForBroker(client mqtt.Client, reconnectedCfg *MQTTConfig) {
+	if appConfig == nil {
+		return
+	}
+
+	for i := range appConfig.Listen {
+		entry := &appConfig.Listen[i]
+		cfg := entry.MQTTConfig
+		if cfg == nil {
+			continue
+		}
+
+		// Check if this listen entry uses the same broker
+		if ConnectionPoolKey(cfg) != ConnectionPoolKey(reconnectedCfg) {
+			continue
+		}
+
+		subscribeTopic := cfg.SubscribeTopic()
+		entryCopy := entry
+		token := client.Subscribe(subscribeTopic, cfg.QoS, func(_ mqtt.Client, msg mqtt.Message) {
+			handleMQTTMessage(entryCopy, msg.Topic(), msg.Payload())
+		})
+		token.Wait()
+		if token.Error() != nil {
+			log.Printf("[WARN] Re-subscribe failed for %s: %v", entry.ID, token.Error())
+		} else if debugClipboard {
+			log.Printf("[DEBUG] Re-subscribed %s", entry.ID)
+		}
+	}
+}
+
+// handleMQTTMessage processes a received MQTT message from a listen entry.
+func handleMQTTMessage(entry *ListenEntry, topic string, payload []byte) {
+	// Check message size limit
+	if entry.MaxMessageSize > 0 && int64(len(payload)) > entry.MaxMessageSize {
+		log.Printf("[WARN] MQTT message discarded: %d bytes exceeds maxMessageSize %d (listen: %s, topic: %s)",
+			len(payload), entry.MaxMessageSize, entry.ID, topic)
+		return
+	}
+
+	// Check interface filter
+	if entry.AllowInterfaceIPs != "" {
+		if !IsAllowedByInterface(entry.AllowInterfaceIPs, "") {
+			if debugClipboard {
+				log.Printf("[DEBUG] Interface filter skip - Listen: %s", entry.ID)
+			}
+			return
+		}
+	}
+
+	// Parse message
+	var msg ClipboardMessage
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		log.Printf("[WARN] Failed to parse MQTT message from %s: %v", entry.ID, err)
+		return
+	}
+
+	// Filter out own messages (echo prevention)
+	if appConfig != nil && msg.DeviceName == appConfig.Device.Name {
+		if debugClipboard {
+			log.Printf("[DEBUG] Skipping own message from %s", msg.DeviceName)
+		}
+		return
+	}
+
+	log.Printf("Received clipboard via MQTT: device=%s, type=%s, listen=%s", msg.DeviceName, msg.Type, entry.ID)
+
+	// Handle V2 messages
+	if IsV2Type(msg.Type) {
+		// Find center from forward rules
+		centerID := findCenterForListen(entry.ID)
+		if centerID != "" {
+			center := appConfig.GetCenterByID(centerID)
+			if center != nil {
+				if err := handleV2Receive(msg, center); err != nil {
+					log.Printf("[ERROR] V2 receive failed: %v", err)
+				}
+				// Continue to forward engine
+				go forwardEngine.ProcessMessage(entry.ID, msg)
+				return
+			}
+		}
+		log.Printf("[WARN] V2 message received but no center configured for listen %s", entry.ID)
+		return
+	}
+
+	// V1 message: set clipboard and trigger forward engine
+	if forwardEngine != nil {
+		// Check if any forward rule routes to "system" for this listen entry
+		if shouldSetLocalClipboard(entry.ID) {
+			setClipboardContent(msg)
+		}
+		go forwardEngine.ProcessMessage(entry.ID, msg)
+	}
+}
+
+// findCenterForListen finds the center ID from a forward rule matching a listen entry.
+func findCenterForListen(listenID string) string {
+	if appConfig == nil {
+		return ""
+	}
+	for i := range appConfig.Forward {
+		rule := &appConfig.Forward[i]
+		for _, from := range rule.From {
+			if from == listenID && rule.Center != "" {
+				return rule.Center
+			}
+		}
+	}
+	return ""
+}
+
+// shouldSetLocalClipboard checks if any forward rule routes from a listen entry to "system".
+func shouldSetLocalClipboard(listenID string) bool {
+	if appConfig == nil {
+		return true
+	}
+	for i := range appConfig.Forward {
+		rule := &appConfig.Forward[i]
+		fromMatch := false
+		for _, from := range rule.From {
+			if from == listenID {
+				fromMatch = true
+				break
+			}
+		}
+		if !fromMatch {
+			continue
+		}
+		for _, to := range rule.To {
+			if to == "system" {
+				return true
+			}
+		}
+	}
+	return false
 }

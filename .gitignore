@@ -3,3 +3,6 @@ clipboard-sync.exe
 clipboard-sync
 clipboard-sync-*
 local_*.sh
+config.yaml
+.env
+.env.local

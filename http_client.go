@@ -25,43 +25,43 @@ import (
 	"time"
 )
 
-func syncViaHTTP(t *SyncTarget, msg ClipboardMessage) error {
+// syncViaHTTPTarget sends a clipboard message to an HTTP target.
+func syncViaHTTPTarget(target *TargetEntry, msg ClipboardMessage) error {
 	jsonData, err := json.Marshal(msg)
 	if err != nil {
-		if debugClipboard {
-			log.Printf("[DEBUG] JSON序列化失败: %v", err)
-		}
 		return err
 	}
+
 	if debugClipboard {
-		log.Printf("[DEBUG] 发送请求 - URL: %s, Type: %s, Content前100字符: %s",
-			t.RawURL, msg.Type, string(jsonData[:min(len(jsonData), 100)]))
+		log.Printf("[DEBUG] HTTP request - Target: %s, Type: %s, Size: %d",
+			target.ID, msg.Type, len(jsonData))
 	}
 
-	// 使用预解析的URL，移除query参数和认证信息
-	reqURL := *t.ParsedURL // 复制
-	reqURL.User = nil      // 清除URL中的认证信息
-	reqURL.RawQuery = ""   // 移除query参数（它们是配置选项如allowInterfaceIps等）
-
-	// 替换路径中的{$type}变量
+	// Build clean URL (strip auth and config params from query)
+	reqURL := *target.ParsedURL
+	reqURL.User = nil
+	reqURL.RawQuery = ""
 	reqURL.Path = resolveTopic(reqURL.Path, msg.Mime)
-
 	cleanURL := reqURL.String()
 
+	// Build HTTP client with optional TLS
+	client, err := httpClientWithCert(target.Certificate)
+	if err != nil {
+		return fmt.Errorf("build HTTP client: %w", err)
+	}
+
 	var lastErr error
-	maxAttempts := t.Retries + 1 // 首次 + 重试次数
+	maxAttempts := target.Retries + 1
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
-			// 重试前延迟
-			time.Sleep(time.Duration(t.RetryDelay) * time.Millisecond)
+			time.Sleep(time.Duration(target.RetryDelay) * time.Millisecond)
 			if debugClipboard {
-				log.Printf("[DEBUG] HTTP重试请求 (attempt %d/%d)", attempt, t.Retries)
+				log.Printf("[DEBUG] HTTP retry (attempt %d/%d) for %s", attempt, target.Retries, target.ID)
 			}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
 		req, err := http.NewRequestWithContext(ctx, "POST", cleanURL, bytes.NewBuffer(jsonData))
 		if err != nil {
 			cancel()
@@ -69,25 +69,21 @@ func syncViaHTTP(t *SyncTarget, msg ClipboardMessage) error {
 			continue
 		}
 
-		// Set Content-Type header to application/json
 		req.Header.Set("Content-Type", "application/json")
-
-		// 设置Basic认证
-		if t.Username != "" {
-			req.SetBasicAuth(t.Username, t.Password)
+		if target.Username != "" {
+			req.SetBasicAuth(target.Username, target.Password)
 		}
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		cancel()
 		if err != nil {
 			if debugClipboard {
-				log.Printf("[DEBUG] 请求失败: %s, URL: %s, 错误: %v", msg.Type, t.RawURL, err)
+				log.Printf("[DEBUG] HTTP request failed: %s, error: %v", target.ID, err)
 			}
 			lastErr = err
 			continue
 		}
 
-		// Read and log the response
 		respBody, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
@@ -96,14 +92,12 @@ func syncViaHTTP(t *SyncTarget, msg ClipboardMessage) error {
 		}
 
 		if debugClipboard {
-			log.Printf("[DEBUG] 网络请求 - URL: %s, Type: %s, Content长度: %d, Response状态: %d, Body: %s",
-				cleanURL, msg.Type, len(jsonData), resp.StatusCode, string(respBody))
-		} else {
-			log.Printf("Request: %s, Response from %s: %s\n", msg.Type, cleanURL, respBody)
+			log.Printf("[DEBUG] HTTP response - Target: %s, Status: %d, Body: %s",
+				target.ID, resp.StatusCode, string(respBody))
 		}
 
-		// HTTP 2xx 成功
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			log.Printf("HTTP sent to %s: %s", cleanURL, msg.Type)
 			return nil
 		}
 

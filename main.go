@@ -15,46 +15,18 @@
 package main
 
 import (
-	"bytes"
 	"encoding/base64"
 	"flag"
-	"io/ioutil"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 )
-
-// initEnv 初始化环境变量，加载 .env 文件
-func initEnv(envFile string) {
-	var envPaths []string
-
-	// 优先使用指定的 env 文件
-	if envFile != "" {
-		envPaths = []string{envFile}
-	} else {
-		// 默认查找路径
-		envPaths = []string{".env", ".env.local"}
-
-		// 获取可执行文件所在目录
-		exePath, err := os.Executable()
-		if err == nil {
-			exeDir := filepath.Dir(exePath)
-			envPaths = append(envPaths, filepath.Join(exeDir, ".env"))
-			envPaths = append(envPaths, filepath.Join(exeDir, ".env.local"))
-		}
-	}
-
-	for _, envPath := range envPaths {
-		if err := LoadEnvFile(envPath); err == nil {
-			log.Printf("[CONFIG] Loaded environment from: %s", envPath)
-			break
-		}
-	}
-}
 
 var (
 	enableClipboard bool
@@ -67,21 +39,20 @@ var (
 
 	stopping bool
 	stopCh   = make(chan struct{})
+
+	forwardEngine *ForwardEngine
 )
 
 const disableDuration = 2 * time.Second
 
-// 设置开始时间
 var startTime = time.Now()
 
 func setClipboardContent(msg ClipboardMessage) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	// 设置忽略读取剪贴板的信号
 	enableClipboard = false
 
-	// content 始终是 base64 编码，需要解码
 	decoded, err := base64.StdEncoding.DecodeString(msg.Content)
 	if err != nil {
 		log.Printf("base64解码失败: %s", err)
@@ -90,7 +61,7 @@ func setClipboardContent(msg ClipboardMessage) {
 		return
 	}
 
-	switch msg.Type {
+	switch BaseContentType(msg.Type) {
 	case "text":
 		err = SetClipboardContentText(string(decoded))
 		if err != nil {
@@ -122,13 +93,12 @@ func ProcessClipboardChange(change ClipboardChange) (*ClipboardMessage, error) {
 		return nil, nil
 	}
 
-	// content 始终为 base64 编码
 	base64Content := base64.StdEncoding.EncodeToString(change.Content)
 
 	return &ClipboardMessage{
 		Time:       float64(change.Timestamp) + float64(time.Now().UnixNano())/1e9 - float64(time.Now().Unix()),
 		UUID:       generateUUID(),
-		DeviceName: getDeviceName(),
+		DeviceName: appConfig.Device.Name,
 		Mime:       mime,
 		Type:       contentType,
 		Content:    base64Content,
@@ -136,39 +106,38 @@ func ProcessClipboardChange(change ClipboardChange) (*ClipboardMessage, error) {
 }
 
 func changeEvent(change ClipboardChange) {
-	// 如果正在停机，忽略新消息
 	if stopping {
 		return
 	}
 
-	// 如果距离开始时间小于1s忽略
 	if time.Since(startTime) < time.Second {
 		log.Println("Ignoring clipboard change within the first second.")
 		return
 	}
 
-	// 去重：相同内容在短时间内不重复发送（修复Wayland重复触发）
-	if bytes.Equal(change.Content, lastChangeContent) && time.Since(lastChangeTime) < time.Second {
-		debugLog("忽略重复剪贴板变更")
-		return
+	// Dedup
+	if appConfig != nil && appConfig.Device.Name != "" {
+		// Use global dedup
+	}
+	if lastChangeContent != nil && lastChangeTime.IsZero() == false {
+		if bytesEqual(change.Content, lastChangeContent) && time.Since(lastChangeTime) < time.Second {
+			debugLog("忽略重复剪贴板变更")
+			return
+		}
 	}
 	lastChangeContent = change.Content
 	lastChangeTime = time.Now()
 
-	// 如果当前为禁止读取剪贴板，忽略
 	if !enableClipboard {
 		log.Println("Clipboard reading is disabled.")
 		return
 	}
 
 	if time.Since(enableTimestamp) < disableDuration/4 {
-		// 0.5秒内，忽略
 		return
 	}
 
-	// 如果当前为恢复剪贴板 2 秒内，忽略
 	if time.Since(enableTimestamp) < disableDuration {
-		//log.Printf("Clipboard reading is temporarily disabled, since: %dms\n", time.Since(enableTimestamp).Milliseconds())
 		return
 	}
 
@@ -181,88 +150,147 @@ func changeEvent(change ClipboardChange) {
 		return
 	}
 
-	// 设置发送时间
 	msg.SendTime = float64(time.Now().Unix()) + float64(time.Now().UnixNano())/1e9 - float64(time.Now().Unix())
 
-	syncClipboardContent(*msg)
+	// Route through forward engine
+	if forwardEngine != nil {
+		forwardEngine.ProcessMessage("system", *msg)
+	}
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func main() {
-	envFile := flag.String("env-file", "", "Path to .env file")
-	receivedWriteText := flag.String("received-write-text", "", "Write text to clipboard (for testing)")
-	receivedImageFile := flag.String("received-image-file", "", "Write image file to clipboard (for testing)")
+	var configPath string
 	var versionFlag bool
+	var receivedWriteText string
+	var receivedImageFile string
+
+	flag.StringVar(&configPath, "config", "", "Path to config file (overrides CLIPBOARD_CONFIG_PATH)")
 	flag.BoolVar(&versionFlag, "version", false, "Print version information")
 	flag.BoolVar(&versionFlag, "v", false, "Print version information (shorthand)")
+	flag.StringVar(&receivedWriteText, "received-write-text", "", "Write text to clipboard (for testing)")
+	flag.StringVar(&receivedImageFile, "received-image-file", "", "Write image file to clipboard (for testing)")
 	flag.Parse()
 
 	if versionFlag {
 		printVersion()
-	}
-
-	// 初始化环境变量（必须在 flag.Parse 之后，以便处理 -env-file 参数）
-	initEnv(*envFile)
-
-	// 在 .env 加载之后再读取 debug 标志
-	debugClipboard = os.Getenv("CLIPBOARD_DEBUG") == "1"
-
-	// 验证设备名称（必需）
-	_ = getDeviceName()
-
-	// 测试模式：不启动HTTP服务器，直接写入剪贴板并触发同步
-	if *receivedWriteText != "" {
-		msg := ClipboardMessage{
-			Time:       float64(time.Now().Unix()) + float64(time.Now().UnixNano())/1e9 - float64(time.Now().Unix()),
-			UUID:       generateUUID(),
-			DeviceName: getDeviceName(),
-			Mime:       "text/plain",
-			Type:       "text",
-			Content:    base64.StdEncoding.EncodeToString([]byte(*receivedWriteText)),
-		}
-		msg.SendTime = float64(time.Now().Unix()) + float64(time.Now().UnixNano())/1e9 - float64(time.Now().Unix())
-		setClipboardContent(msg)
-		syncClipboardContent(msg) // 触发同步推送
-		log.Printf("Wrote text to clipboard and synced: %s", *receivedWriteText)
 		return
 	}
 
-	if *receivedImageFile != "" {
-		data, err := ioutil.ReadFile(*receivedImageFile)
+	// Subcommand handling
+	args := flag.Args()
+	if len(args) > 0 {
+		switch args[0] {
+		case "start":
+			runStart(configPath, receivedWriteText, receivedImageFile)
+		case "download-config":
+			runDownloadConfig(configPath)
+		case "help", "--help":
+			printHelp()
+		case "version", "--version", "-v":
+			printVersion()
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown command: %s\nUse 'help' for usage.\n", args[0])
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Default: start (backward compatible with direct flags)
+	runStart(configPath, receivedWriteText, receivedImageFile)
+}
+
+func runStart(configPath, receivedWriteText, receivedImageFile string) {
+	// Load config
+	path := configPath
+	if path == "" {
+		path = ConfigPath()
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		log.Fatalf("Failed to load config from %s: %v", path, err)
+	}
+	appConfig = cfg
+
+	debugClipboard = IsDebug()
+	log.Printf("Config loaded from: %s, device: %s", path, cfg.Device.Name)
+
+	// Test mode: write to clipboard and sync
+	if receivedWriteText != "" {
+		msg := ClipboardMessage{
+			Time:       float64(time.Now().Unix()) + float64(time.Now().UnixNano())/1e9 - float64(time.Now().Unix()),
+			UUID:       generateUUID(),
+			DeviceName: cfg.Device.Name,
+			Mime:       "text/plain",
+			Type:       "text",
+			Content:    base64.StdEncoding.EncodeToString([]byte(receivedWriteText)),
+		}
+		msg.SendTime = float64(time.Now().Unix()) + float64(time.Now().UnixNano())/1e9 - float64(time.Now().Unix())
+		setClipboardContent(msg)
+
+		forwardEngine = NewForwardEngine(cfg)
+		forwardEngine.ProcessMessage("system", msg)
+		log.Printf("Wrote text to clipboard and synced: %s", receivedWriteText)
+		return
+	}
+
+	if receivedImageFile != "" {
+		data, err := os.ReadFile(receivedImageFile)
 		if err != nil {
 			log.Fatalf("Failed to read image file: %v", err)
 		}
 		msg := ClipboardMessage{
 			Time:       float64(time.Now().Unix()) + float64(time.Now().UnixNano())/1e9 - float64(time.Now().Unix()),
 			UUID:       generateUUID(),
-			DeviceName: getDeviceName(),
+			DeviceName: cfg.Device.Name,
 			Mime:       "image/png",
 			Type:       "image",
 			Content:    base64.StdEncoding.EncodeToString(data),
 		}
 		msg.SendTime = float64(time.Now().Unix()) + float64(time.Now().UnixNano())/1e9 - float64(time.Now().Unix())
 		setClipboardContent(msg)
-		syncClipboardContent(msg) // 触发同步推送
-		log.Printf("Wrote image file to clipboard and synced: %s", *receivedImageFile)
+
+		forwardEngine = NewForwardEngine(cfg)
+		forwardEngine.ProcessMessage("system", msg)
+		log.Printf("Wrote image file to clipboard and synced: %s", receivedImageFile)
 		return
 	}
 
-	// 正常模式：启动监听和同步
+	// Initialize forward engine
+	forwardEngine = NewForwardEngine(cfg)
+
+	// Initialize network monitor if needed
 	if needsInterfaceFilter() {
 		InitNetworkMonitor()
 		defer CloseNetworkMonitor()
 	}
 
-	clipboardChanges := ListenClipboardChanges()
+	// Subscribe to MQTT listen entries
+	SubscribeAllListeners()
 
+	// Start local HTTP server
 	go startLocalServer()
 
 	enableClipboard = true
-
 	initClipboard()
 
-	// 监听系统信号
+	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	clipboardChanges := ListenClipboardChanges()
 
 	for {
 		select {
@@ -278,4 +306,68 @@ func main() {
 			return
 		}
 	}
+}
+
+func runDownloadConfig(configPath string) {
+	remoteURL := os.Getenv("REMOTE_CONFIG_URL")
+	if remoteURL == "" && appConfig != nil {
+		remoteURL = appConfig.RemoteConfig
+	}
+	if remoteURL == "" {
+		log.Fatal("REMOTE_CONFIG_URL is not set and no remoteConfig in config")
+	}
+
+	path := configPath
+	if path == "" {
+		path = ConfigPath()
+	}
+
+	log.Printf("Downloading config from %s to %s", remoteURL, path)
+
+	resp, err := http.Get(remoteURL)
+	if err != nil {
+		log.Fatalf("Download config failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Fatalf("Download config failed: HTTP %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Read config failed: %v", err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		log.Fatalf("Write config failed: %v", err)
+	}
+
+	log.Printf("Config saved to %s (%d bytes)", path, len(data))
+}
+
+func printHelp() {
+	fmt.Print(`clipboard-sync - Clipboard synchronization tool
+
+Usage:
+  clipboard-sync [command]
+
+Commands:
+  start            Start the service (default)
+  download-config  Download remote config from REMOTE_CONFIG_URL
+  help             Show this help message
+  version          Show version
+
+Flags:
+  -config string              Path to config file (overrides CLIPBOARD_CONFIG_PATH)
+  -received-write-text string Write text to clipboard (for testing)
+  -received-image-file string Write image file to clipboard (for testing)
+  -v, -version                Print version
+
+Environment Variables:
+  CLIPBOARD_DEBUG       Enable debug logging (set to "1")
+  CLIPBOARD_CONFIG_PATH Config file path (default: config.yaml)
+  REMOTE_CONFIG_URL     URL for download-config command
+
+`)
 }

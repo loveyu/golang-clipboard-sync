@@ -1,0 +1,84 @@
+# clipboard-sync 配置文件
+# 复制此文件为 config.yaml 并根据需要修改
+
+# 设备配置
+device:
+  name: "notebook-debian13"          # 设备名称，用于标识和消息来源
+  allowedInterfacePatterns: "eth*,enp*,wlp*"  # 允许的网卡名称模式
+  maxRuntime: 3600                   # 剪贴板监听器最大运行时间(秒)，超时后自动重启
+
+# 调试模式 (也可通过 CLIPBOARD_DEBUG=1 环境变量启用)
+debug: false
+
+# HTTP 基本配置
+http:
+  port: ":9144"  # 本地HTTP接收服务器端口
+
+# 远程配置下载URL (用于 download-config 命令)
+# 也支持 REMOTE_CONFIG_URL 环境变量
+remoteConfig: ""
+
+# 证书配置 (被 centers 和 DSN 中的 certificate 参数引用)
+# certificates:
+#   - id: "home-ca"
+#     ca: "/path/to/ca.crt"              # CA证书路径
+#   - id: "home-mtls"
+#     ca: "/path/to/ca.crt"              # CA证书
+#     cert: "/path/to/client.crt"        # 客户端证书 (mTLS)
+#     key: "/path/to/client.key"         # 客户端密钥 (mTLS)
+
+# 剪贴板中心 (HTTP中继服务器，用于V2协议传输大文件)
+# 当 forward 规则配置了 center 时，图片或超过10KB的文本会通过中继传输
+# centers:
+#   - id: "home"
+#     url: "http://10.11.11.8:8080"       # 中心HTTP地址
+#     token: "change-me-to-secure-token"  # Bearer token 认证
+#     textMsgId: "clipboard-text"         # 文本消息ID (预定义，非UUID)
+#     imageMsgId: "clipboard-image"       # 图片消息ID (预定义，非UUID)
+#     # certificate: "home-ca"            # HTTPS时引用证书ID
+
+# MQTT 订阅入口 (用于接收其他设备的剪贴板内容)
+# DSN格式: mqtt[s]://username:password@host:port/topic?params
+# {$type} 在订阅时自动替换为 MQTT通配符 "+"
+# 支持的参数:
+#   maxMessageSize       - 最大消息大小 (如 1MB, 512KB)，超过则丢弃
+#   certificate          - 引用 certificates 中的证书ID
+#   connectTimeout       - 连接超时(秒)，默认3
+#   keepAliveInterval    - 心跳间隔(秒)，默认60
+#   automaticReconnect   - 自动重连 (true/false)，默认true
+#   qos                  - QoS等级 (0/1/2)，默认1
+#   retain               - 保留消息 (true/false)，默认true
+# listen:
+#   - id: "home-recv"
+#     dsn: "mqtt://clipboard:password@10.11.11.8:1883/linux-clipboard-{$type}/+?maxMessageSize=5MB"
+#     allowInterfaceIps: "10.11.11.0/24"  # 仅当本机IP匹配时才接收
+#   - id: "mobile-recv"
+#     dsn: "mqtt://mobile-k50:password@10.4.125.53:1883/linux-clipboard-{$type}/+?maxMessageSize=5MB"
+#     allowInterfaceIps: "10.4.0.0/16"
+
+# 发布目标 (用于发送剪贴板内容到其他设备)
+# 支持MQTT和HTTP协议
+# targets:
+#   - id: "home-pub"
+#     dsn: "mqtt://clipboard:password@10.11.11.8:1883/linux-clipboard-{$type}/notebook-debian13"
+#     allowInterfaceIps: "10.11.11.0/24"
+#   - id: "mobile-pub"
+#     dsn: "mqtt://mobile-k50:password@10.4.125.53:1883/linux-clipboard-{$type}/notebook-debian13"
+#     allowInterfaceIps: "10.4.0.0/16"
+#   - id: "http-target"
+#     dsn: "http://192.168.1.100:9144/update-clipboard"
+
+# 转发规则
+# from: 消息来源ID数组 ("system" = 本地剪贴板, 或 listen 条目ID)
+# to: 目标ID数组 ("system" = 设置本地剪贴板, 或 target 条目ID)
+# center: 可选，引用 center ID。配置后启用 V2 中继协议
+# 所有规则都会被匹配，目标会自动去重
+# forward:
+#   # 本地剪贴板变更 -> 发布到MQTT目标
+#   - from: ["system"]
+#     to: ["home-pub", "mobile-pub"]
+#     center: "home"
+#   # 从MQTT接收 -> 设置本地剪贴板
+#   - from: ["home-recv", "mobile-recv"]
+#     to: ["system"]
+#     center: "home"

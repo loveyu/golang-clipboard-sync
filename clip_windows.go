@@ -18,6 +18,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"runtime"
 	"strings"
@@ -44,6 +45,7 @@ var (
 	translateMessage              = userDLL.NewProc("TranslateMessage")
 	defWindowProcW                = userDLL.NewProc("DefWindowProcW")
 	getModuleHandleW              = kernel32DLL.NewProc("GetModuleHandleW")
+	messageBoxW                  = userDLL.NewProc("MessageBoxW")
 )
 
 const (
@@ -134,8 +136,19 @@ func initClipboard() {
 	log.Println("windows剪贴板初始化")
 	err := clipboard.Init()
 	if err != nil {
-		panic(err)
+		msg := fmt.Sprintf("剪贴板初始化失败: %v", err)
+		log.Printf("[ERROR] %s", msg)
+		showErrorDialog("clipboard-sync - 环境检查失败", msg)
+		log.Fatalf("Exiting: clipboard init failed: %v", err)
 	}
+}
+
+// showErrorDialog shows a Win32 MessageBox error dialog.
+func showErrorDialog(title, message string) {
+	titlePtr, _ := windows.UTF16PtrFromString(title)
+	messagePtr, _ := windows.UTF16PtrFromString(message)
+	// MB_ICONERROR = 0x10, MB_OK = 0, MB_SETFOREGROUND = 0x10000
+	messageBoxW.Call(0, uintptr(unsafe.Pointer(messagePtr)), uintptr(unsafe.Pointer(titlePtr)), 0x10|0x10000)
 }
 
 // ReadClipboardContent 依据类型读取剪贴板

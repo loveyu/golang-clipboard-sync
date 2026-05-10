@@ -195,8 +195,11 @@ func getLocalIPs() []net.IP {
 		defaultPatterns = ""
 	}
 
-	// 检查是否配置了自定义模式
-	allowedPatterns := getEnv("CLIPBOARD_ALLOWED_INTERFACE_PATTERNS", defaultPatterns)
+	// Use config patterns or OS defaults
+	allowedPatterns := defaultPatterns
+	if appConfig != nil && appConfig.Device.AllowedInterfacePatterns != "" {
+		allowedPatterns = appConfig.Device.AllowedInterfacePatterns
+	}
 
 	for _, iface := range ifaces {
 		// 跳过loopback
