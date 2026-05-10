@@ -24,16 +24,21 @@ jobs:
       - name: Install Mosquitto
         shell: powershell
         run: |
-          # Get the latest mosquitto release from GitHub API and download the Windows installer
-          $release = Invoke-RestMethod "https://api.github.com/repos/eclipse/mosquitto/releases/latest"
-          $tag = $release.tag_name          # e.g. v2.0.20
-          $version = $tag.TrimStart('v')
           $installer = "$env:TEMP\mosquitto-setup.exe"
-          $url = "https://mosquitto.org/files/binary/win64/mosquitto-$version-install-windows-x64.exe"
-          Write-Host "Downloading mosquitto $version from $url"
-          curl.exe -L --retry 3 --retry-delay 5 -o $installer $url
-          if ((Get-Item $installer).Length -lt 100000) {
-            Write-Error "Downloaded file is too small - wrong URL or version ($version)"
+          $downloaded = $false
+          foreach ($version in @("2.0.21", "2.0.20", "2.0.19", "2.0.18")) {
+            $url = "https://mosquitto.org/files/binary/win64/mosquitto-$version-install-windows-x64.exe"
+            Write-Host "Trying mosquitto $version from $url"
+            curl.exe -L --retry 3 --retry-delay 5 -o $installer $url
+            if ((Test-Path $installer) -and (Get-Item $installer).Length -ge 100000) {
+              Write-Host "Downloaded mosquitto $version successfully"
+              $downloaded = $true
+              break
+            }
+            Write-Host "Version $version not available, trying next..."
+          }
+          if (-not $downloaded) {
+            Write-Error "Failed to download mosquitto from mosquitto.org"
             exit 1
           }
           Start-Process -FilePath $installer -ArgumentList "/S" -Wait
