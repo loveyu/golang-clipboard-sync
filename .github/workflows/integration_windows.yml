@@ -26,9 +26,8 @@ jobs:
         run: |
           $version = "2.0.21"
           $installer = "$env:TEMP\mosquitto-setup.exe"
-          Invoke-WebRequest `
-            -Uri "https://github.com/eclipse/mosquitto/releases/download/v$version/mosquitto-$version-install-windows-x64.exe" `
-            -OutFile $installer -UseBasicParsing
+          curl.exe -L --retry 3 --retry-delay 5 -o $installer `
+            "https://github.com/eclipse/mosquitto/releases/download/v$version/mosquitto-$version-install-windows-x64.exe"
           Start-Process -FilePath $installer -ArgumentList "/S" -Wait
           Start-Sleep -Seconds 5
           # Stop the auto-started service so our test script can start it with custom config
