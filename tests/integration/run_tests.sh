@@ -17,6 +17,9 @@ APP_PORT=9144
 DEVICE_NAME="test-device"
 TEST_TOKEN="test-integration-token"
 
+# Clipboard environment: "x11" (default) or "wayland"
+CLIPBOARD_ENV="${CLIPBOARD_ENV:-x11}"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -129,6 +132,28 @@ reset_mock() {
     python3 "${SCRIPT_DIR}/mock_server.py" ${CENTER_PORT} ${CAPTURE_PORT} &
     MOCK_PID=$!
     sleep 1
+}
+
+# ======================== Clipboard env helpers ========================
+
+# Returns 0 if the required clipboard tools for the current env are present.
+check_clipboard_env() {
+    if [ "$CLIPBOARD_ENV" = "wayland" ]; then
+        command -v wl-paste >/dev/null 2>&1 && command -v wl-copy >/dev/null 2>&1
+    else
+        command -v xvfb-run >/dev/null 2>&1 && command -v xclip >/dev/null 2>&1
+    fi
+}
+
+# Run a command with the appropriate clipboard environment wrapper.
+# Wayland: runs directly (compositor must already be running in the shell env).
+# X11: wraps with xvfb-run to provide a virtual display.
+run_with_clipboard() {
+    if [ "$CLIPBOARD_ENV" = "wayland" ]; then
+        "$@"
+    else
+        xvfb-run -a "$@"
+    fi
 }
 
 # ======================== Tests ========================
@@ -369,8 +394,8 @@ EOF
 test_mqtt_receive_v1() {
     echo "--- Test 6: MQTT receive -> HTTP forward ---"
 
-    if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v xclip >/dev/null 2>&1; then
-        log_skip "requires xvfb-run and xclip"
+    if ! check_clipboard_env; then
+        log_skip "requires clipboard env tools (x11: xvfb-run+xclip, wayland: wl-paste+wl-copy)"
         return
     fi
 
@@ -394,7 +419,7 @@ forward:
     to: ["system", "http-dest"]
 EOF
 
-    xvfb-run -a "${BUILD_DIR}/clipboard-sync" -config "$config" > "${RESULT_DIR}/recv.log" 2>&1 &
+    run_with_clipboard "${BUILD_DIR}/clipboard-sync" -config "$config" > "${RESULT_DIR}/recv.log" 2>&1 &
     local app_pid=$!
     sleep 3
 
@@ -434,8 +459,8 @@ print(len(msgs))
 test_echo_prevention() {
     echo "--- Test 7: Echo prevention ---"
 
-    if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v xclip >/dev/null 2>&1; then
-        log_skip "requires xvfb-run and xclip"
+    if ! check_clipboard_env; then
+        log_skip "requires clipboard env tools (x11: xvfb-run+xclip, wayland: wl-paste+wl-copy)"
         return
     fi
 
@@ -463,7 +488,7 @@ d = json.loads(urllib.request.urlopen('http://localhost:${CAPTURE_PORT}/_stats')
 print(d['count'])
 ")
 
-    xvfb-run -a "${BUILD_DIR}/clipboard-sync" -config "$config" > "${RESULT_DIR}/echo.log" 2>&1 &
+    run_with_clipboard "${BUILD_DIR}/clipboard-sync" -config "$config" > "${RESULT_DIR}/echo.log" 2>&1 &
     local app_pid=$!
     sleep 3
 
@@ -497,8 +522,8 @@ print(d['count'])
 test_mqtt_receive_v2() {
     echo "--- Test 8: V2 receive via MQTT + Center ---"
 
-    if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v xclip >/dev/null 2>&1; then
-        log_skip "requires xvfb-run and xclip"
+    if ! check_clipboard_env; then
+        log_skip "requires clipboard env tools (x11: xvfb-run+xclip, wayland: wl-paste+wl-copy)"
         return
     fi
 
@@ -535,7 +560,7 @@ forward:
     center: "test-center"
 EOF
 
-    xvfb-run -a "${BUILD_DIR}/clipboard-sync" -config "$config" > "${RESULT_DIR}/v2_recv.log" 2>&1 &
+    run_with_clipboard "${BUILD_DIR}/clipboard-sync" -config "$config" > "${RESULT_DIR}/v2_recv.log" 2>&1 &
     local app_pid=$!
     sleep 3
 

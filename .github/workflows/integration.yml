@@ -8,8 +8,13 @@ on:
 
 jobs:
   integration:
-    name: Run Integration Tests
+    name: Integration Tests (${{ matrix.clipboard_env }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        clipboard_env: [x11, wayland]
 
     steps:
       - name: Checkout
@@ -19,28 +24,80 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: true
 
-      - name: Install dependencies
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-${{ matrix.clipboard_env }}-${{ hashFiles('.github/workflows/integration.yml') }}
+          restore-keys: apt-${{ runner.os }}-${{ matrix.clipboard_env }}-
+
+      - name: Cache Docker images
+        id: docker-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/docker-cache
+          key: docker-${{ runner.os }}-eclipse-mosquitto-2
+
+      - name: Load or pull Docker image
+        run: |
+          if [ -f /tmp/docker-cache/mosquitto.tar ]; then
+            docker load < /tmp/docker-cache/mosquitto.tar
+          else
+            docker pull eclipse-mosquitto:2
+            mkdir -p /tmp/docker-cache
+            docker save eclipse-mosquitto:2 > /tmp/docker-cache/mosquitto.tar
+          fi
+
+      - name: Install X11 dependencies
+        if: matrix.clipboard_env == 'x11'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq mosquitto-clients xclip xsel xvfb curl jq python3
+          sudo apt-get install -y -qq --no-install-recommends mosquitto-clients xclip xsel xvfb curl jq python3
+
+      - name: Install Wayland dependencies
+        if: matrix.clipboard_env == 'wayland'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends mosquitto-clients weston wl-clipboard curl jq python3
 
       - name: Build
         run: |
           CGO_ENABLED=0 go build -o tests/integration/build/clipboard-sync .
 
-      - name: Run integration tests
+      - name: Run integration tests (X11)
+        if: matrix.clipboard_env == 'x11'
         run: |
           chmod +x tests/integration/run_tests.sh
           ./tests/integration/run_tests.sh
         env:
           CI: true
+          CLIPBOARD_ENV: x11
+
+      - name: Run integration tests (Wayland)
+        if: matrix.clipboard_env == 'wayland'
+        run: |
+          chmod +x tests/integration/run_tests.sh
+          mkdir -p /tmp/xdg-runtime
+          chmod 700 /tmp/xdg-runtime
+          export XDG_RUNTIME_DIR=/tmp/xdg-runtime
+          weston --backend=headless --no-config --socket=wayland-test &
+          WESTON_PID=$!
+          sleep 2
+          export WAYLAND_DISPLAY=wayland-test
+          export XDG_SESSION_TYPE=wayland
+          ./tests/integration/run_tests.sh
+          kill $WESTON_PID 2>/dev/null || true
+        env:
+          CI: true
+          CLIPBOARD_ENV: wayland
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: integration-test-results
+          name: integration-test-results-${{ matrix.clipboard_env }}
           path: |
             tests/integration/results/
             tests/integration/*.log
