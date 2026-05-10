@@ -17,8 +17,15 @@ APP_PORT=9144
 DEVICE_NAME="test-device"
 TEST_TOKEN="test-integration-token"
 
-# Clipboard environment: "x11" (default), "wayland", or "darwin"
+# Clipboard environment: "x11" (default), "wayland", "darwin", or "windows"
 CLIPBOARD_ENV="${CLIPBOARD_ENV:-x11}"
+
+# Binary extension (Windows Git Bash needs .exe)
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|CYGWIN*|MSYS*) EXE_EXT=".exe" ;;
+    *) EXE_EXT="" ;;
+esac
+BINARY="${BUILD_DIR}/clipboard-sync${EXE_EXT}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -52,7 +59,7 @@ mkdir -p "${BUILD_DIR}" "${CONFIG_DIR}" "${RESULT_DIR}"
 # Build
 echo "Building..."
 cd "${PROJECT_DIR}"
-CGO_ENABLED=0 go build -o "${BUILD_DIR}/clipboard-sync" . || { echo "Build failed"; exit 1; }
+CGO_ENABLED=0 go build -o "${BINARY}" . || { echo "Build failed"; exit 1; }
 
 # Generate test image (small PNG)
 python3 -c "
@@ -79,7 +86,7 @@ cat > /tmp/mosquitto-test/mosquitto.conf <<EOF
 listener ${MQTT_PORT}
 allow_anonymous true
 EOF
-if command -v docker >/dev/null 2>&1; then
+if [ "$CLIPBOARD_ENV" != "windows" ] && command -v docker >/dev/null 2>&1; then
     docker rm -f mosquitto-test 2>/dev/null || true
     docker run -d --name mosquitto-test -p ${MQTT_PORT}:1883 \
         -v /tmp/mosquitto-test/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro \
@@ -158,6 +165,8 @@ check_clipboard_env() {
         command -v wl-paste >/dev/null 2>&1 && command -v wl-copy >/dev/null 2>&1
     elif [ "$CLIPBOARD_ENV" = "darwin" ]; then
         command -v pbcopy >/dev/null 2>&1 && command -v pbpaste >/dev/null 2>&1
+    elif [ "$CLIPBOARD_ENV" = "windows" ]; then
+        return 0
     else
         command -v xvfb-run >/dev/null 2>&1 && command -v xclip >/dev/null 2>&1
     fi
@@ -167,7 +176,7 @@ check_clipboard_env() {
 # Wayland/darwin: runs directly (compositor or native clipboard already available).
 # X11: wraps with xvfb-run to provide a virtual display.
 run_with_clipboard() {
-    if [ "$CLIPBOARD_ENV" = "wayland" ] || [ "$CLIPBOARD_ENV" = "darwin" ]; then
+    if [ "$CLIPBOARD_ENV" = "wayland" ] || [ "$CLIPBOARD_ENV" = "darwin" ] || [ "$CLIPBOARD_ENV" = "windows" ]; then
         "$@"
     else
         xvfb-run -a "$@"
@@ -195,7 +204,7 @@ forward:
 EOF
 
     local sub_pid=$(start_subscriber "test/text-v1" "${outfile}")
-    "${BUILD_DIR}/clipboard-sync" -config "$config" --received-write-text "Hello V1" >/dev/null 2>&1
+    "${BINARY}" -config "$config" --received-write-text "Hello V1" >/dev/null 2>&1
 
     wait $sub_pid 2>/dev/null || true
 
@@ -231,7 +240,7 @@ forward:
 EOF
 
     local sub_pid=$(start_subscriber "test/image-v1" "${outfile}")
-    "${BUILD_DIR}/clipboard-sync" -config "$config" --received-image-file "${RESULT_DIR}/test_image.png" >/dev/null 2>&1
+    "${BINARY}" -config "$config" --received-image-file "${RESULT_DIR}/test_image.png" >/dev/null 2>&1
 
     wait $sub_pid 2>/dev/null || true
 
@@ -278,7 +287,7 @@ forward:
 EOF
 
     local sub_pid=$(start_subscriber "test/text-v2" "${outfile}")
-    "${BUILD_DIR}/clipboard-sync" -config "$config" --received-write-text "$big_text" >/dev/null 2>&1
+    "${BINARY}" -config "$config" --received-write-text "$big_text" >/dev/null 2>&1
 
     wait $sub_pid 2>/dev/null || true
 
@@ -347,7 +356,7 @@ forward:
 EOF
 
     local sub_pid=$(start_subscriber "test/image-v2" "${outfile}")
-    "${BUILD_DIR}/clipboard-sync" -config "$config" --received-image-file "${RESULT_DIR}/test_image.png" >/dev/null 2>&1
+    "${BINARY}" -config "$config" --received-image-file "${RESULT_DIR}/test_image.png" >/dev/null 2>&1
 
     wait $sub_pid 2>/dev/null || true
 
@@ -389,7 +398,7 @@ forward:
     to: ["http-target"]
 EOF
 
-    "${BUILD_DIR}/clipboard-sync" -config "$config" --received-write-text "Hello HTTP" >/dev/null 2>&1
+    "${BINARY}" -config "$config" --received-write-text "Hello HTTP" >/dev/null 2>&1
     sleep 1
 
     local stats=$(curl -sf http://localhost:${CAPTURE_PORT}/_stats)
@@ -437,7 +446,7 @@ forward:
     to: ["system", "http-dest"]
 EOF
 
-    run_with_clipboard "${BUILD_DIR}/clipboard-sync" -config "$config" > "${RESULT_DIR}/recv.log" 2>&1 &
+    run_with_clipboard "${BINARY}" -config "$config" > "${RESULT_DIR}/recv.log" 2>&1 &
     local app_pid=$!
     sleep 3
 
@@ -506,7 +515,7 @@ d = json.loads(urllib.request.urlopen('http://localhost:${CAPTURE_PORT}/_stats')
 print(d['count'])
 ")
 
-    run_with_clipboard "${BUILD_DIR}/clipboard-sync" -config "$config" > "${RESULT_DIR}/echo.log" 2>&1 &
+    run_with_clipboard "${BINARY}" -config "$config" > "${RESULT_DIR}/echo.log" 2>&1 &
     local app_pid=$!
     sleep 3
 
@@ -578,7 +587,7 @@ forward:
     center: "test-center"
 EOF
 
-    run_with_clipboard "${BUILD_DIR}/clipboard-sync" -config "$config" > "${RESULT_DIR}/v2_recv.log" 2>&1 &
+    run_with_clipboard "${BINARY}" -config "$config" > "${RESULT_DIR}/v2_recv.log" 2>&1 &
     local app_pid=$!
     sleep 3
 

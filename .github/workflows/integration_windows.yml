@@ -1,0 +1,56 @@
+name: Integration Tests (Windows)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  integration-windows:
+    name: Integration Tests (windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Install Mosquitto
+        shell: powershell
+        run: |
+          choco install mosquitto --no-progress -y
+          # Stop the auto-started service so the test script can start it with custom config
+          Stop-Service -Name "mosquitto" -Force -ErrorAction SilentlyContinue
+
+      - name: Add Mosquitto to PATH
+        shell: bash
+        run: echo "C:/Program Files/mosquitto" >> $GITHUB_PATH
+
+      - name: Build
+        shell: bash
+        run: CGO_ENABLED=0 go build -o tests/integration/build/clipboard-sync.exe .
+
+      - name: Run integration tests
+        shell: bash
+        run: |
+          chmod +x tests/integration/run_tests.sh
+          ./tests/integration/run_tests.sh
+        env:
+          CI: true
+          CLIPBOARD_ENV: windows
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-windows
+          path: |
+            tests/integration/results/
+            tests/integration/*.log
+          retention-days: 7
