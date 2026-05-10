@@ -553,7 +553,8 @@ print(json.dumps(msg))
     sleep 2
 
     # Check app log for V2 download
-    local v2_ok=$(grep -c "V2 download" "${RESULT_DIR}/v2_recv.log" 2>/dev/null || echo 0)
+    local v2_ok=0
+    grep -q "V2 download" "${RESULT_DIR}/v2_recv.log" 2>/dev/null && v2_ok=1
 
     # Check HTTP capture for forwarded message
     local stats=$(curl -sf http://localhost:${CAPTURE_PORT}/_stats)

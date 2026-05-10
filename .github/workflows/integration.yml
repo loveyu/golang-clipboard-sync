@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq mosquitto-clients xclip xvfb curl jq python3
+          sudo apt-get install -y -qq mosquitto-clients xclip xsel xvfb curl jq python3
 
       - name: Build
         run: |
