@@ -176,6 +176,7 @@ func main() {
 	var receivedWriteText string
 	var receivedImageFile string
 
+	flag.Usage = printHelp
 	flag.StringVar(&configPath, "config", "", "Path to config file (overrides CLIPBOARD_CONFIG_PATH)")
 	flag.BoolVar(&versionFlag, "version", false, "Print version information")
 	flag.BoolVar(&versionFlag, "v", false, "Print version information (shorthand)")
@@ -194,9 +195,13 @@ func main() {
 		switch args[0] {
 		case "start":
 			runStart(configPath, receivedWriteText, receivedImageFile)
+		case "init-config":
+			runInitConfig(configPath)
+		case "show-example-config":
+			os.Stdout.Write(configExample)
 		case "download-config":
 			runDownloadConfig(configPath)
-		case "help", "--help":
+		case "help":
 			printHelp()
 		case "version", "--version", "-v":
 			printVersion()
@@ -308,6 +313,27 @@ func runStart(configPath, receivedWriteText, receivedImageFile string) {
 	}
 }
 
+func runInitConfig(configPath string) {
+	path := configPath
+	if path == "" {
+		path = ConfigPath()
+	}
+
+	if _, err := os.Stat(path); err == nil {
+		fmt.Fprintf(os.Stderr, "Error: config file already exists: %s\n", path)
+		fmt.Fprintf(os.Stderr, "Remove it first or use -config to specify a different path.\n")
+		os.Exit(1)
+	}
+
+	if err := os.WriteFile(path, configExample, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to write config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Example config written to: %s\n", path)
+	fmt.Println("Edit the file and run: clipboard-sync start")
+}
+
 func runDownloadConfig(configPath string) {
 	remoteURL := os.Getenv("REMOTE_CONFIG_URL")
 	if remoteURL == "" && appConfig != nil {
@@ -347,27 +373,68 @@ func runDownloadConfig(configPath string) {
 }
 
 func printHelp() {
-	fmt.Print(`clipboard-sync - Clipboard synchronization tool
+	fmt.Print(`clipboard-sync - 跨设备剪贴板同步工具
 
-Usage:
-  clipboard-sync [command]
+用法:
+  clipboard-sync [command] [flags]
 
-Commands:
-  start            Start the service (default)
-  download-config  Download remote config from REMOTE_CONFIG_URL
-  help             Show this help message
-  version          Show version
+命令:
+  start               启动服务（默认，省略命令时等同于 start）
+  init-config         将内置示例配置写入配置文件（文件已存在时报错）
+  show-example-config 打印内置示例配置到标准输出
+  download-config     从远程URL下载配置文件（需配置 remoteConfig 或 REMOTE_CONFIG_URL）
+  help                显示此帮助信息
+  version             显示版本信息
 
-Flags:
-  -config string              Path to config file (overrides CLIPBOARD_CONFIG_PATH)
-  -received-write-text string Write text to clipboard (for testing)
-  -received-image-file string Write image file to clipboard (for testing)
-  -v, -version                Print version
+标志:
+  -config string                配置文件路径（覆盖 CLIPBOARD_CONFIG_PATH 环境变量）
+  -v, -version                  显示版本信息
+  -received-write-text string   将文本写入本地剪贴板并通过 forward 规则同步（测试用）
+  -received-image-file string   将图片文件写入本地剪贴板并通过 forward 规则同步（测试用）
 
-Environment Variables:
-  CLIPBOARD_DEBUG       Enable debug logging (set to "1")
-  CLIPBOARD_CONFIG_PATH Config file path (default: config.yaml)
-  REMOTE_CONFIG_URL     URL for download-config command
+环境变量:
+  CLIPBOARD_DEBUG=1      启用调试日志（等同于配置 debug: true）
+  CLIPBOARD_CONFIG_PATH  配置文件路径（默认: config.yaml）
+  REMOTE_CONFIG_URL      download-config 命令使用的远程配置URL
+
+DSN参数（listen 条目，格式: mqtt[s]://user:pass@host:port/topic?params）:
+  maxMessageSize       最大消息大小（如 5MB, 512KB），超过则丢弃
+  clientId             MQTT客户端ID（默认自动生成）
+  connectTimeout       连接超时（秒，默认 3）
+  keepAliveInterval    心跳间隔（秒，默认 60）
+  automaticReconnect   自动重连（true/false，默认 true）
+  reconnectInterval    重连基础间隔（秒，默认 5）
+  reconnectMaxInterval 最大重连间隔（秒，默认 60）
+  qos                  QoS等级（0/1/2，默认 1）
+  certificate          引用 certificates 中的ID（mqtts时使用）
+
+DSN参数（targets MQTT条目，含上述参数外还有）:
+  retain               发布时是否保留消息（true/false，默认 true）
+  types                过滤内容类型，逗号分隔（如 "text,image"，为空则不过滤）
+  retries              失败重试次数（默认 1）
+  retryDelay           重试间隔（毫秒，默认 50）
+
+DSN参数（targets HTTP条目，格式: http[s]://user:pass@host:port/path?params）:
+  types                过滤内容类型，逗号分隔（如 "text,image"，为空则不过滤）
+  retries              失败重试次数（默认 0）
+  retryDelay           重试间隔（毫秒，默认 50）
+
+保留 ID（不可用于 listen/target/center 的 id 字段）:
+  system  本地剪贴板（forward.from = 监听本地变更，forward.to = 写入本地）
+  http    HTTP接收端点（forward.from 中使用）
+
+HTTP 端点:
+  POST /update-clipboard  接收 ClipboardMessage JSON，通过 forward 规则路由
+
+消息协议:
+  V1  内容直接内嵌于MQTT消息（Base64编码）
+  V2  内容上传至中继服务器，MQTT消息只传引用（图片或文本>10KB时自动使用）
+
+配置文件:
+  clipboard-sync show-example-config          # 查看示例配置
+  clipboard-sync init-config                  # 生成 config.yaml（文件已存在时报错）
+  clipboard-sync init-config -config foo.yaml # 生成指定路径的配置文件
 
 `)
 }
+
