@@ -40,7 +40,6 @@ remoteConfig: ""
 
 # MQTT 订阅入口 (用于接收其他设备的剪贴板内容)
 # DSN格式: mqtt[s]://username:password@host:port/topic?params
-# {$type} 在订阅时自动替换为 MQTT通配符 "+"
 # 支持的参数:
 #   maxMessageSize       - 最大消息大小 (如 1MB, 512KB)，超过则丢弃
 #   certificate          - 引用 certificates 中的证书ID
@@ -49,12 +48,14 @@ remoteConfig: ""
 #   automaticReconnect   - 自动重连 (true/false)，默认true
 #   qos                  - QoS等级 (0/1/2)，默认1
 #   retain               - 保留消息 (true/false)，默认true
+# topics 字段可额外指定多个订阅topic，与DSN路径中的topic合并，至少需要配置一个topic
 # listen:
 #   - id: "home-recv"
-#     dsn: "mqtt://clipboard:password@10.11.11.8:1883/linux-clipboard-{$type}/+?maxMessageSize=5MB"
+#     dsn: "mqtt://clipboard:password@10.11.11.8:1883/clipboard-out-text/notebook-debian?maxMessageSize=5MB"
+#     topics: ["clipboard-out-image/notebook-debian"]
 #     allowInterfaceIps: "10.11.11.0/24"  # 仅当本机IP匹配时才接收
 #   - id: "mobile-recv"
-#     dsn: "mqtt://mobile-k50:password@10.4.125.53:1883/linux-clipboard-{$type}/+?maxMessageSize=5MB"
+#     dsn: "mqtt://mobile-k50:password@10.4.125.53:1883/clipboard-out-text/+?maxMessageSize=5MB"
 #     allowInterfaceIps: "10.4.0.0/16"
 
 # 发布目标 (用于发送剪贴板内容到其他设备)

@@ -26,10 +26,10 @@ type Config struct {
 	Forward      []ForwardRule `yaml:"forward"`
 
 	// Resolved lookup maps (populated by LoadConfig)
-	certByID    map[string]*Certificate
-	centerByID  map[string]*Center
-	listenByID  map[string]*ListenEntry
-	targetByID  map[string]*TargetEntry
+	certByID   map[string]*Certificate
+	centerByID map[string]*Center
+	listenByID map[string]*ListenEntry
+	targetByID map[string]*TargetEntry
 }
 
 type DeviceConfig struct {
@@ -60,14 +60,16 @@ type Center struct {
 }
 
 type ListenEntry struct {
-	ID                string `yaml:"id"`
-	DSN               string `yaml:"dsn"`
-	AllowInterfaceIPs string `yaml:"allowInterfaceIps"`
+	ID                string   `yaml:"id"`
+	DSN               string   `yaml:"dsn"`
+	Topics            []string `yaml:"topics"`
+	AllowInterfaceIPs string   `yaml:"allowInterfaceIps"`
 
 	// Resolved at load time
 	MQTTConfig     *MQTTConfig
 	MaxMessageSize int64
 	Certificate    *Certificate
+	ResolvedTopics []string // all topics to subscribe (from DSN path + Topics)
 }
 
 type TargetEntry struct {
@@ -263,6 +265,25 @@ func resolveListenEntry(e *ListenEntry, certMap map[string]*Certificate) error {
 	}
 	e.MQTTConfig = mqttCfg
 	e.MaxMessageSize = maxSize
+
+	// Collect topics: path from DSN + explicit topics list
+	seen := make(map[string]bool)
+	var topics []string
+	addTopic := func(t string) {
+		t = strings.TrimSpace(t)
+		if t != "" && t != "/" && !seen[t] {
+			seen[t] = true
+			topics = append(topics, t)
+		}
+	}
+	addTopic(strings.TrimPrefix(u.Path, "/"))
+	for _, t := range e.Topics {
+		addTopic(t)
+	}
+	if len(topics) == 0 {
+		return fmt.Errorf("no topics configured: specify a topic in the DSN path or via the topics field")
+	}
+	e.ResolvedTopics = topics
 
 	// Resolve certificate
 	certID := u.Query().Get("certificate")
@@ -496,11 +517,6 @@ func (cfg *MQTTConfig) GetBrokerAddress() string {
 		return "ssl://" + cfg.Broker
 	}
 	return "tcp://" + cfg.Broker
-}
-
-// SubscribeTopics returns the topic with {$type} replaced by MQTT wildcard + for subscriptions.
-func (cfg *MQTTConfig) SubscribeTopic() string {
-	return strings.ReplaceAll(cfg.Topic, "{$type}", "+")
 }
 
 // BuildMQTTClientOptions creates paho MQTT client options from MQTTConfig with optional TLS.

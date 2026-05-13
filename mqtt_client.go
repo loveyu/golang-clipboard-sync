@@ -127,7 +127,7 @@ func createMQTTClient(cfg *MQTTConfig, cert *Certificate) (mqtt.Client, error) {
 	}
 
 	if debugClipboard {
-		log.Printf("[DEBUG] MQTT connected to %s, topic: %s", cfg.GetBrokerAddress(), cfg.Topic)
+		log.Printf("[DEBUG] MQTT connected to %s", cfg.GetBrokerAddress())
 	}
 
 	return client, nil
@@ -176,18 +176,18 @@ func SubscribeAllListeners() {
 			continue
 		}
 
-		subscribeTopic := cfg.SubscribeTopic()
-		if debugClipboard {
-			log.Printf("[DEBUG] Subscribing to %s (listen: %s)", subscribeTopic, entry.ID)
-		}
-
 		entryCopy := entry
-		token := client.Subscribe(subscribeTopic, cfg.QoS, func(_ mqtt.Client, msg mqtt.Message) {
-			handleMQTTMessage(entryCopy, msg.Topic(), msg.Payload())
-		})
-		token.Wait()
-		if token.Error() != nil {
-			log.Printf("[WARN] Subscribe failed for %s: %v", entry.ID, token.Error())
+		for _, topic := range entry.ResolvedTopics {
+			topicCopy := topic
+			token := client.Subscribe(topicCopy, cfg.QoS, func(_ mqtt.Client, msg mqtt.Message) {
+				handleMQTTMessage(entryCopy, msg.Topic(), msg.Payload())
+			})
+			token.Wait()
+			if token.Error() != nil {
+				log.Printf("[WARN] Subscribe failed for %s (topic: %s): %v", entry.ID, topicCopy, token.Error())
+			} else if debugClipboard {
+				log.Printf("[DEBUG] Subscribed to %s (listen: %s)", topicCopy, entry.ID)
+			}
 		}
 	}
 }
@@ -210,16 +210,18 @@ func resubscribeForBroker(client mqtt.Client, reconnectedCfg *MQTTConfig) {
 			continue
 		}
 
-		subscribeTopic := cfg.SubscribeTopic()
 		entryCopy := entry
-		token := client.Subscribe(subscribeTopic, cfg.QoS, func(_ mqtt.Client, msg mqtt.Message) {
-			handleMQTTMessage(entryCopy, msg.Topic(), msg.Payload())
-		})
-		token.Wait()
-		if token.Error() != nil {
-			log.Printf("[WARN] Re-subscribe failed for %s: %v", entry.ID, token.Error())
-		} else if debugClipboard {
-			log.Printf("[DEBUG] Re-subscribed %s", entry.ID)
+		for _, topic := range entry.ResolvedTopics {
+			topicCopy := topic
+			token := client.Subscribe(topicCopy, cfg.QoS, func(_ mqtt.Client, msg mqtt.Message) {
+				handleMQTTMessage(entryCopy, msg.Topic(), msg.Payload())
+			})
+			token.Wait()
+			if token.Error() != nil {
+				log.Printf("[WARN] Re-subscribe failed for %s (topic: %s): %v", entry.ID, topicCopy, token.Error())
+			} else if debugClipboard {
+				log.Printf("[DEBUG] Re-subscribed %s (topic: %s)", entry.ID, topicCopy)
+			}
 		}
 	}
 }
