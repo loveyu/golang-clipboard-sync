@@ -45,7 +45,7 @@ var (
 	translateMessage              = userDLL.NewProc("TranslateMessage")
 	defWindowProcW                = userDLL.NewProc("DefWindowProcW")
 	getModuleHandleW              = kernel32DLL.NewProc("GetModuleHandleW")
-	messageBoxW                  = userDLL.NewProc("MessageBoxW")
+	messageBoxW                   = userDLL.NewProc("MessageBoxW")
 )
 
 const (
@@ -248,64 +248,27 @@ func runMessageLoop(changes chan<- ClipboardChange) {
 
 	log.Printf("剪贴板监听窗口已创建: %d", hwnd)
 
+	events := make(chan struct{}, 1)
+	workerStopCh := make(chan struct{})
+	workerDoneCh := make(chan struct{})
+	go func() {
+		defer close(workerDoneCh)
+		consumeClipboardEvents(events, workerStopCh, clipboardEventDebounce, func() {
+			change := readWindowsClipboardChange()
+			select {
+			case changes <- change:
+			default:
+			}
+		})
+	}()
+	defer func() {
+		clipboardNotify = nil
+		close(workerStopCh)
+		<-workerDoneCh
+	}()
+
 	clipboardNotify = func() {
-		if debugClipboard {
-			log.Printf("剪贴板内容变化，正在处理...")
-		}
-
-		mime := "text/plain"
-		var content []byte
-
-		// 使用Windows API检测剪贴板格式，比直接读取更高效
-		if ok, _, _ := isClipboardFormatAvailable.Call(CF_HDROP); ok != 0 {
-			mime = "application/x-file-list"
-			// 优先读取图片内容，然后识别是否为图片
-			content = clipboard.Read(clipboard.FmtImage)
-			if len(content) > 0 {
-				mime = "image/png"
-			}
-		} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_UNICODETEXT); ok != 0 {
-			mime = "text/plain"
-			content = clipboard.Read(clipboard.FmtText)
-		} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_BITMAP); ok != 0 {
-			mime = "image/png"
-			content = clipboard.Read(clipboard.FmtImage)
-		} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_DIB); ok != 0 {
-			mime = "image/bmp"
-			content = clipboard.Read(clipboard.FmtImage)
-		} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_ENHMETAFILE); ok != 0 {
-			mime = "image/emf"
-			content = clipboard.Read(clipboard.FmtImage)
-		} else {
-			// 回退：尝试读取内容
-			content = clipboard.Read(clipboard.FmtText)
-			imageContent := clipboard.Read(clipboard.FmtImage)
-			if len(imageContent) > 0 {
-				mime = "image/png"
-				content = imageContent
-			} else if len(content) > 0 {
-				mime = "text/plain"
-			} else {
-				mime = "unknown"
-			}
-		}
-
-		if debugClipboard {
-			displayContent := string(content)
-			if len(displayContent) > 100 {
-				displayContent = displayContent[:100] + "..."
-			}
-			log.Printf("[DEBUG] 剪贴板变更 - MIME: %s, 内容长度: %d, 内容: %s",
-				mime, len(content), displayContent)
-		}
-		select {
-		case changes <- ClipboardChange{
-			Timestamp: time.Now().Unix(),
-			Mime:      mime,
-			Content:   content,
-		}:
-		default:
-		}
+		notifyClipboardEvent(events)
 	}
 
 	var msg msg
@@ -320,6 +283,63 @@ func runMessageLoop(changes chan<- ClipboardChange) {
 
 	removeClipboardFormatListener.Call(uintptr(hwnd))
 	destroyWindow.Call(uintptr(hwnd))
+}
+
+func readWindowsClipboardChange() ClipboardChange {
+	if debugClipboard {
+		log.Printf("剪贴板内容变化，正在串行处理...")
+	}
+
+	mime := "text/plain"
+	var content []byte
+
+	// 使用Windows API检测剪贴板格式，比直接读取更高效
+	if ok, _, _ := isClipboardFormatAvailable.Call(CF_HDROP); ok != 0 {
+		mime = "application/x-file-list"
+		// 优先读取图片内容，然后识别是否为图片
+		content = clipboard.Read(clipboard.FmtImage)
+		if len(content) > 0 {
+			mime = "image/png"
+		}
+	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_UNICODETEXT); ok != 0 {
+		mime = "text/plain"
+		content = clipboard.Read(clipboard.FmtText)
+	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_BITMAP); ok != 0 {
+		mime = "image/png"
+		content = clipboard.Read(clipboard.FmtImage)
+	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_DIB); ok != 0 {
+		mime = "image/bmp"
+		content = clipboard.Read(clipboard.FmtImage)
+	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_ENHMETAFILE); ok != 0 {
+		mime = "image/emf"
+		content = clipboard.Read(clipboard.FmtImage)
+	} else {
+		// 回退：尝试读取内容
+		content = clipboard.Read(clipboard.FmtText)
+		imageContent := clipboard.Read(clipboard.FmtImage)
+		if len(imageContent) > 0 {
+			mime = "image/png"
+			content = imageContent
+		} else if len(content) > 0 {
+			mime = "text/plain"
+		} else {
+			mime = "unknown"
+		}
+	}
+
+	if debugClipboard {
+		displayContent := string(content)
+		if len(displayContent) > 100 {
+			displayContent = displayContent[:100] + "..."
+		}
+		log.Printf("[DEBUG] 剪贴板变更 - MIME: %s, 内容长度: %d, 内容: %s",
+			mime, len(content), displayContent)
+	}
+	return ClipboardChange{
+		Timestamp: time.Now().Unix(),
+		Mime:      mime,
+		Content:   content,
+	}
 }
 
 func debugLog(format string, args ...interface{}) {

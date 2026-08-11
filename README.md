@@ -270,4 +270,3 @@ The `encoding` field indicates how the center stores the content: `base64` (defa
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
-
