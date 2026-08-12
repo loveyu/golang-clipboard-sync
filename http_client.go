@@ -27,6 +27,10 @@ import (
 
 // syncViaHTTPTarget sends a clipboard message to an HTTP target.
 func syncViaHTTPTarget(target *TargetEntry, msg ClipboardMessage) error {
+	return syncViaHTTPTargetContext(context.Background(), target, msg)
+}
+
+func syncViaHTTPTargetContext(ctx context.Context, target *TargetEntry, msg ClipboardMessage) error {
 	jsonData, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -55,14 +59,16 @@ func syncViaHTTPTarget(target *TargetEntry, msg ClipboardMessage) error {
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(target.RetryDelay) * time.Millisecond)
+			if err := waitForContext(ctx, time.Duration(target.RetryDelay)*time.Millisecond); err != nil {
+				return err
+			}
 			if debugClipboard {
 				log.Printf("[DEBUG] HTTP retry (attempt %d/%d) for %s", attempt, target.Retries, target.ID)
 			}
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		req, err := http.NewRequestWithContext(ctx, "POST", cleanURL, bytes.NewBuffer(jsonData))
+		requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		req, err := http.NewRequestWithContext(requestCtx, "POST", cleanURL, bytes.NewBuffer(jsonData))
 		if err != nil {
 			cancel()
 			lastErr = err

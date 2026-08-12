@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"log"
@@ -12,36 +13,36 @@ import (
 // ForwardEngine routes clipboard messages based on forward rules.
 type ForwardEngine struct {
 	cfg *Config
+
+	ctx           context.Context
+	cancel        context.CancelFunc
+	asyncMu       sync.Mutex
+	closing       bool
+	sendersClosed bool
+	senders       map[string]*targetSender
+	local         *clipboardChangeSender
+	sendTarget    targetSendFunc
+	processChange func(ClipboardChange) (*ClipboardMessage, error)
 }
 
 // NewForwardEngine creates a new forward engine.
 func NewForwardEngine(cfg *Config) *ForwardEngine {
-	return &ForwardEngine{cfg: cfg}
+	ctx, cancel := context.WithCancel(context.Background())
+	e := &ForwardEngine{
+		cfg:           cfg,
+		ctx:           ctx,
+		cancel:        cancel,
+		senders:       make(map[string]*targetSender),
+		processChange: ProcessClipboardChange,
+	}
+	e.sendTarget = e.forwardToTarget
+	return e
 }
 
 // ProcessMessage routes a clipboard message from a source to all matching targets.
 // sourceID is "system" for local clipboard changes, or a listen entry ID.
 func (e *ForwardEngine) ProcessMessage(sourceID string, msg ClipboardMessage) {
-	// Collect all target IDs from matching forward rules
-	targetIDSet := make(map[string]bool)
-
-	for i := range e.cfg.Forward {
-		rule := &e.cfg.Forward[i]
-		matched := false
-		for _, from := range rule.From {
-			if from == sourceID {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			continue
-		}
-
-		for _, to := range rule.To {
-			targetIDSet[to] = true
-		}
-	}
+	targetIDSet := e.targetIDs(sourceID)
 
 	if len(targetIDSet) == 0 {
 		return
@@ -69,11 +70,35 @@ func (e *ForwardEngine) ProcessMessage(sourceID string, msg ClipboardMessage) {
 			}
 
 			center := e.findCenterForTarget(sourceID, id)
-			e.forwardToTarget(target, msg, center)
+			e.sendTarget(context.Background(), target, msg, center)
 		}(targetID)
 	}
 
 	wg.Wait()
+}
+
+func (e *ForwardEngine) targetIDs(sourceID string) map[string]bool {
+	targetIDSet := make(map[string]bool)
+
+	for i := range e.cfg.Forward {
+		rule := &e.cfg.Forward[i]
+		matched := false
+		for _, from := range rule.From {
+			if from == sourceID {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+
+		for _, to := range rule.To {
+			targetIDSet[to] = true
+		}
+	}
+
+	return targetIDSet
 }
 
 // findCenterForTarget finds the center ID from a forward rule matching source->target.
@@ -100,7 +125,7 @@ func (e *ForwardEngine) findCenterForTarget(sourceID, targetID string) string {
 }
 
 // forwardToTarget sends a message to a specific target.
-func (e *ForwardEngine) forwardToTarget(target *TargetEntry, msg ClipboardMessage, centerID string) {
+func (e *ForwardEngine) forwardToTarget(ctx context.Context, target *TargetEntry, msg ClipboardMessage, centerID string) {
 	// Check network condition
 	if target.AllowInterfaceIPs != "" {
 		if !isInterfaceAllowed(target.AllowInterfaceIPs, "") {
@@ -123,15 +148,15 @@ func (e *ForwardEngine) forwardToTarget(target *TargetEntry, msg ClipboardMessag
 	}
 
 	if target.IsMQTT {
-		e.forwardViaMQTT(target, msg, centerID)
+		e.forwardViaMQTT(ctx, target, msg, centerID)
 	} else {
-		e.forwardViaHTTP(target, msg)
+		e.forwardViaHTTP(ctx, target, msg)
 	}
 }
 
 // forwardViaMQTT sends a message via MQTT. If centerID is set and content qualifies,
 // uses V2 relay mode.
-func (e *ForwardEngine) forwardViaMQTT(target *TargetEntry, msg ClipboardMessage, centerID string) {
+func (e *ForwardEngine) forwardViaMQTT(ctx context.Context, target *TargetEntry, msg ClipboardMessage, centerID string) {
 	useV2 := false
 	if centerID != "" && needsRelay(msg.Type, msg.Content) {
 		center := e.cfg.GetCenterByID(centerID)
@@ -176,7 +201,7 @@ func (e *ForwardEngine) forwardViaMQTT(target *TargetEntry, msg ClipboardMessage
 
 		// PUT to center
 		deviceName := e.cfg.Device.Name
-		if err := putToCenter(centerCfg, deviceName, msgID, uploadData, contentType); err != nil {
+		if err := putToCenterContext(ctx, centerCfg, deviceName, msgID, uploadData, contentType); err != nil {
 			log.Printf("[ERROR] Failed to PUT to center %s: %v", centerID, err)
 			return
 		}
@@ -204,20 +229,24 @@ func (e *ForwardEngine) forwardViaMQTT(target *TargetEntry, msg ClipboardMessage
 	}
 
 	// Publish via MQTT
-	if err := publishMQTTMessage(target, publishMsg); err != nil {
+	if err := publishMQTTMessageContext(ctx, target, publishMsg); err != nil {
 		log.Printf("[ERROR] MQTT publish to %s failed: %v", target.ID, err)
 	}
 }
 
 // forwardViaHTTP sends a message via HTTP POST.
-func (e *ForwardEngine) forwardViaHTTP(target *TargetEntry, msg ClipboardMessage) {
-	if err := syncViaHTTPTarget(target, msg); err != nil {
+func (e *ForwardEngine) forwardViaHTTP(ctx context.Context, target *TargetEntry, msg ClipboardMessage) {
+	if err := syncViaHTTPTargetContext(ctx, target, msg); err != nil {
 		log.Printf("[ERROR] HTTP forward to %s failed: %v", target.ID, err)
 	}
 }
 
 // publishMQTTMessage publishes a ClipboardMessage to an MQTT target.
 func publishMQTTMessage(target *TargetEntry, msg ClipboardMessage) error {
+	return publishMQTTMessageContext(context.Background(), target, msg)
+}
+
+func publishMQTTMessageContext(ctx context.Context, target *TargetEntry, msg ClipboardMessage) error {
 	cfg := target.MQTTConfig
 	topic := resolveTopic(cfg.Topic, msg.Mime)
 
@@ -236,33 +265,37 @@ func publishMQTTMessage(target *TargetEntry, msg ClipboardMessage) error {
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(target.RetryDelay) * time.Millisecond)
+			if err := waitForContext(ctx, time.Duration(target.RetryDelay)*time.Millisecond); err != nil {
+				return err
+			}
 			if debugClipboard {
 				log.Printf("[DEBUG] MQTT retry (attempt %d/%d) for %s", attempt, cfg.Retries, target.ID)
 			}
 		}
 
-		client, err := getMQTTClientForTarget(target)
+		client, err := getMQTTClientForTargetContext(ctx, target)
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
 		if !client.IsConnected() {
-			for i := 0; i < 30; i++ {
-				time.Sleep(time.Second)
-				if client.IsConnected() {
-					break
+			if err := waitForMQTTConnection(ctx, client, 30*time.Second); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
 				}
-			}
-			if !client.IsConnected() {
 				lastErr = errDisconnected
 				continue
 			}
 		}
 
 		token := client.Publish(topic, cfg.QoS, cfg.Retain, jsonData)
-		if token.WaitTimeout(10 * time.Second) {
+		publishTimer := time.NewTimer(10 * time.Second)
+		select {
+		case <-token.Done():
+			if !publishTimer.Stop() {
+				<-publishTimer.C
+			}
 			if err := token.Error(); err != nil {
 				lastErr = err
 				if attempt < cfg.Retries {
@@ -272,14 +305,56 @@ func publishMQTTMessage(target *TargetEntry, msg ClipboardMessage) error {
 			}
 			log.Printf("MQTT published to %s: %s", topic, msg.Type)
 			return nil
+		case <-ctx.Done():
+			if !publishTimer.Stop() {
+				<-publishTimer.C
+			}
+			return ctx.Err()
+		case <-publishTimer.C:
+			lastErr = errPublishTimeout
 		}
-		lastErr = errPublishTimeout
 		if attempt < cfg.Retries {
 			closeMQTTClientByConfig(cfg)
 		}
 	}
 
 	return lastErr
+}
+
+func waitForMQTTConnection(ctx context.Context, client interface{ IsConnected() bool }, timeout time.Duration) error {
+	if client.IsConnected() {
+		return nil
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return errDisconnected
+		case <-ticker.C:
+			if client.IsConnected() {
+				return nil
+			}
+		}
+	}
+}
+
+func waitForContext(ctx context.Context, duration time.Duration) error {
+	if duration <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // resolveTopic resolves {$type} placeholder in topic.

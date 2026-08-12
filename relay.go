@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
@@ -71,6 +72,10 @@ func httpClientWithCert(cert *Certificate) (*http.Client, error) {
 // putToCenter uploads data to a clipboard center.
 // PUT {centerURL}/client/{clientName}/{msgID} with Bearer token auth.
 func putToCenter(center *Center, clientName, msgID string, data []byte, contentType string) error {
+	return putToCenterContext(context.Background(), center, clientName, msgID, data, contentType)
+}
+
+func putToCenterContext(ctx context.Context, center *Center, clientName, msgID string, data []byte, contentType string) error {
 	cert := resolveCertForCenter(center)
 
 	client, err := httpClientWithCert(cert)
@@ -80,7 +85,7 @@ func putToCenter(center *Center, clientName, msgID string, data []byte, contentT
 
 	u := strings.TrimSuffix(center.URL, "/") + "/client/" + clientName + "/" + msgID
 
-	req, err := http.NewRequest("PUT", u, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "PUT", u, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}

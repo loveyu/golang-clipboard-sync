@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -64,11 +65,19 @@ func hashURL(rawURL string) string {
 
 // getMQTTClientForTarget gets or creates an MQTT client for a target entry.
 func getMQTTClientForTarget(target *TargetEntry) (mqtt.Client, error) {
-	return getOrCreateMQTTClient(target.MQTTConfig, target.Certificate)
+	return getMQTTClientForTargetContext(context.Background(), target)
+}
+
+func getMQTTClientForTargetContext(ctx context.Context, target *TargetEntry) (mqtt.Client, error) {
+	return getOrCreateMQTTClientContext(ctx, target.MQTTConfig, target.Certificate)
 }
 
 // getOrCreateMQTTClient gets or creates an MQTT client using broker+credentials as key.
 func getOrCreateMQTTClient(cfg *MQTTConfig, cert *Certificate) (mqtt.Client, error) {
+	return getOrCreateMQTTClientContext(context.Background(), cfg, cert)
+}
+
+func getOrCreateMQTTClientContext(ctx context.Context, cfg *MQTTConfig, cert *Certificate) (mqtt.Client, error) {
 	key := ConnectionPoolKey(cfg)
 
 	mqttPool.mu.RLock()
@@ -86,7 +95,7 @@ func getOrCreateMQTTClient(cfg *MQTTConfig, cert *Certificate) (mqtt.Client, err
 		return client, nil
 	}
 
-	client, err := createMQTTClient(cfg, cert)
+	client, err := createMQTTClientContext(ctx, cfg, cert)
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +106,10 @@ func getOrCreateMQTTClient(cfg *MQTTConfig, cert *Certificate) (mqtt.Client, err
 
 // createMQTTClient creates a new MQTT client.
 func createMQTTClient(cfg *MQTTConfig, cert *Certificate) (mqtt.Client, error) {
+	return createMQTTClientContext(context.Background(), cfg, cert)
+}
+
+func createMQTTClientContext(ctx context.Context, cfg *MQTTConfig, cert *Certificate) (mqtt.Client, error) {
 	opts := BuildMQTTClientOptions(cfg, cert)
 
 	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
@@ -118,12 +131,19 @@ func createMQTTClient(cfg *MQTTConfig, cert *Certificate) (mqtt.Client, error) {
 	client := mqtt.NewClient(opts)
 
 	token := client.Connect()
-	if token.WaitTimeout(time.Duration(cfg.ConnectTimeout) * time.Second) {
+	timer := time.NewTimer(time.Duration(cfg.ConnectTimeout) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-token.Done():
 		if err := token.Error(); err != nil {
 			return nil, fmt.Errorf("MQTT connection failed: %w", err)
 		}
-	} else {
+	case <-timer.C:
+		client.Disconnect(0)
 		return nil, fmt.Errorf("MQTT connection timeout: %s", cfg.Broker)
+	case <-ctx.Done():
+		client.Disconnect(0)
+		return nil, ctx.Err()
 	}
 
 	if debugClipboard {
@@ -280,7 +300,7 @@ func handleMQTTMessage(entry *ListenEntry, topic string, payload []byte) {
 
 	// Route through forward engine (handles "system" target for local clipboard)
 	if forwardEngine != nil {
-		go forwardEngine.ProcessMessage(entry.ID, msg)
+		go forwardEngine.DispatchMessage(entry.ID, msg)
 	}
 }
 

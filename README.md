@@ -10,7 +10,8 @@ Cross-platform clipboard synchronization tool with flexible MQTT and HTTP multi-
 - **Multi-protocol**: MQTT (pub/sub) and HTTP (push) protocols
 - **Cross-platform**: Linux (X11/Wayland), macOS, Windows
 - **Native Wayland**: Pure Go, single data-control connection with no Cgo or runtime `libwayland`
-- **Reliable deduplication**: Raw-content and pixel-exact image deduplication plus content-bound echo suppression
+- **Reliable deduplication**: Raw-content and background pixel-exact image deduplication plus content-bound echo suppression
+- **Asynchronous forwarding**: Isolated serial MQTT/HTTP senders keep slow targets away from capture and other targets
 - **Forward Engine**: Flexible message routing with multi-source/multi-target and automatic deduplication
 - **V2 Relay Protocol**: Large files relayed via HTTP center server; MQTT only transmits a reference
 - **Certificate Support**: Custom CA and mTLS client certificates
@@ -132,7 +133,15 @@ Runtime disconnects reconnect at 1, 2, 4, 8, 16, 30, then at most 60 seconds.
 Set `CLIPBOARD_BACKEND=command` for an immediate rollback.
 The native backend waits `imageReadDelayMs` before reading an image so screenshot tools and clipboard
 managers finish their critical path first. Locally written selections include an origin marker, allowing
-matching echoes to be rejected without transferring or decoding the image; pixel deduplication remains a fallback.
+matching echoes to be rejected without transferring or decoding the image. A full raw-content SHA-256 is still
+computed immediately after capture. Only differently encoded candidate images with matching format and dimensions
+are decoded in a bounded background queue for pixel-exact comparison, so later clipboard reads are not blocked.
+
+In long-running mode, message construction and Base64 encoding also run in the background. Every MQTT/HTTP target
+has an isolated serial sender with at most one active and one latest pending message. A slow target coalesces stale
+work that has not started instead of retaining an unbounded image backlog, while other targets continue independently.
+Shutdown stops intake, drains message construction and target queues within a deadline, then cancels in-flight network
+requests if necessary. The `--received-write-text` and `--received-image-file` test modes still wait synchronously.
 
 ### http — Local HTTP Server
 

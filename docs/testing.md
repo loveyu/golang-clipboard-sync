@@ -24,8 +24,9 @@ CLIPBOARD_BACKEND=command CLIPBOARD_WAYLAND_INTEGRATION=1 \
   go test -run TestWaylandMonitorTimedRestartDoesNotLeakProcess -v .
 ```
 
-单元测试覆盖 generation 事件合并、最大读取并发为 1、原始与像素指纹去重、内容绑定回声抑制、
-读取超时/超限，以及 Wayland offer 的单 MIME 请求、FD 分段读取、取消和关闭。
+单元测试覆盖 generation 事件合并、最大读取并发为 1、原始与后台像素指纹去重、内容绑定回声抑制、
+异步目标隔离、单目标顺序与有界合并、退出排空/取消、读取超时/超限，以及 Wayland offer 的
+单 MIME 请求、FD 分段读取、取消和关闭。
 
 ### 自动测试脚本
 

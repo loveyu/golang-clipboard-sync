@@ -109,10 +109,17 @@ type clipboardFingerprintEntry struct {
 	kind       string
 	raw        [sha256.Size]byte
 	at         time.Time
+	imageKey   clipboardImageKey
+	imageKeyOK bool
 	pixel      [sha256.Size]byte
 	pixelOK    bool
 	pixelTried bool
 	imageData  []byte
+}
+
+type clipboardImageKey struct {
+	format        string
+	width, height int
 }
 
 type clipboardEchoEntry struct {
@@ -124,14 +131,98 @@ type clipboardEchoEntry struct {
 	expiresAt       time.Time
 }
 
-type clipboardPixelTask struct {
-	content []byte
-	result  chan clipboardPixelResult
+type clipboardDedupTask struct {
+	change  ClipboardChange
+	raw     [sha256.Size]byte
+	backend string
+	read    time.Duration
+	merged  int
 }
 
-type clipboardPixelResult struct {
-	fingerprint [sha256.Size]byte
-	ok          bool
+// clipboardDedupQueue keeps at most one not-yet-started task. If exact image
+// comparison is still running, newer clipboard contents replace stale pending
+// contents so capture callbacks never wait for image decoding.
+type clipboardDedupQueue struct {
+	mu         sync.Mutex
+	ready      clipboardDedupTask
+	readySet   bool
+	working    bool
+	pending    clipboardDedupTask
+	pendingSet bool
+	closed     bool
+	signal     chan struct{}
+}
+
+func newClipboardDedupQueue() *clipboardDedupQueue {
+	return &clipboardDedupQueue{signal: make(chan struct{}, 1)}
+}
+
+func (q *clipboardDedupQueue) notify(task clipboardDedupTask) (clipboardDedupTask, bool) {
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return clipboardDedupTask{}, false
+	}
+	var replaced clipboardDedupTask
+	var hadPending bool
+	if !q.working && !q.readySet {
+		q.ready = task
+		q.readySet = true
+	} else {
+		replaced = q.pending
+		hadPending = q.pendingSet
+		q.pending = task
+		q.pendingSet = true
+	}
+	q.mu.Unlock()
+
+	select {
+	case q.signal <- struct{}{}:
+	default:
+	}
+	return replaced, hadPending
+}
+
+func (q *clipboardDedupQueue) take() (clipboardDedupTask, bool, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if !q.readySet {
+		return clipboardDedupTask{}, false, q.closed
+	}
+	task := q.ready
+	q.ready = clipboardDedupTask{}
+	q.readySet = false
+	q.working = true
+	return task, true, false
+}
+
+func (q *clipboardDedupQueue) complete() {
+	q.mu.Lock()
+	q.working = false
+	if q.pendingSet {
+		q.ready = q.pending
+		q.readySet = true
+		q.pending = clipboardDedupTask{}
+		q.pendingSet = false
+	}
+	hasReady := q.readySet
+	q.mu.Unlock()
+	if hasReady {
+		select {
+		case q.signal <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (q *clipboardDedupQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	select {
+	case q.signal <- struct{}{}:
+	default:
+	}
 }
 
 type clipboardProcessor struct {
@@ -146,8 +237,9 @@ type clipboardProcessor struct {
 	hmacReady      bool
 	activeReads    atomic.Int32
 	maxReads       atomic.Int32
-	pixelTasks     chan clipboardPixelTask
-	pixelDone      chan struct{}
+	dedupQueue     *clipboardDedupQueue
+	dedupDone      chan struct{}
+	pixelHash      func([]byte) ([sha256.Size]byte, bool)
 
 	echoMu sync.Mutex
 	echo   *clipboardEchoEntry
@@ -159,8 +251,9 @@ func newClipboardProcessor(cfg ClipboardConfig, output chan<- ClipboardChange) *
 		queue:      newClipboardEventQueue(),
 		output:     output,
 		now:        time.Now,
-		pixelTasks: make(chan clipboardPixelTask),
-		pixelDone:  make(chan struct{}),
+		dedupQueue: newClipboardDedupQueue(),
+		dedupDone:  make(chan struct{}),
+		pixelHash:  clipboardPixelFingerprint,
 	}
 	if _, err := rand.Read(p.hmacKey[:]); err != nil {
 		log.Printf("[CLIPBOARD] 生成调试摘要密钥失败: %v", err)
@@ -175,10 +268,10 @@ func (p *clipboardProcessor) Notify(event clipboardPlatformEvent) {
 }
 
 func (p *clipboardProcessor) Run(stop <-chan struct{}) {
-	go p.runPixelWorker()
+	go p.runDedupWorker(stop)
 	defer func() {
-		close(p.pixelTasks)
-		<-p.pixelDone
+		p.dedupQueue.close()
+		<-p.dedupDone
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -209,19 +302,46 @@ func (p *clipboardProcessor) Run(stop <-chan struct{}) {
 	}
 }
 
-func (p *clipboardProcessor) runPixelWorker() {
-	defer close(p.pixelDone)
-	for task := range p.pixelTasks {
-		fingerprint, ok := clipboardPixelFingerprint(task.content)
-		task.result <- clipboardPixelResult{fingerprint: fingerprint, ok: ok}
-	}
-}
+func (p *clipboardProcessor) runDedupWorker(stop <-chan struct{}) {
+	defer close(p.dedupDone)
+	for {
+		select {
+		case <-p.dedupQueue.signal:
+		case <-stop:
+			return
+		}
 
-func (p *clipboardProcessor) pixelFingerprint(content []byte) ([sha256.Size]byte, bool) {
-	result := make(chan clipboardPixelResult, 1)
-	p.pixelTasks <- clipboardPixelTask{content: content, result: result}
-	value := <-result
-	return value.fingerprint, value.ok
+		for {
+			task, ok, closed := p.dedupQueue.take()
+			if !ok {
+				if closed {
+					return
+				}
+				break
+			}
+			kind := clipboardContentKind(task.change.Mime)
+			if reason := p.duplicateReason(kind, task.raw, task.change.Content); reason != "" {
+				p.logSkip(reason, task.backend, task.change.Mime, len(task.change.Content), task.read, task.merged)
+				p.dedupQueue.complete()
+				continue
+			}
+
+			if debugClipboard {
+				log.Printf("[CLIPBOARD] backend=%s mime=%s bytes=%d read=%v merged=%d id=%s maxConcurrentReads=%d",
+					task.backend, task.change.Mime, len(task.change.Content), task.read, task.merged,
+					p.debugDigest(kind, task.change.Content), p.maxReads.Load())
+			} else {
+				log.Printf("[CLIPBOARD] backend=%s mime=%s bytes=%d read=%v merged=%d",
+					task.backend, task.change.Mime, len(task.change.Content), task.read, task.merged)
+			}
+			select {
+			case p.output <- task.change:
+				p.dedupQueue.complete()
+			case <-stop:
+				return
+			}
+		}
+	}
 }
 
 func (p *clipboardProcessor) eventDelay(event clipboardPlatformEvent) time.Duration {
@@ -348,21 +468,13 @@ func (p *clipboardProcessor) process(parent context.Context, stop <-chan struct{
 		p.logSkip("local-echo", event.Backend, mime, len(content), elapsed, merged)
 		return
 	}
-	if reason := p.duplicateReason(kind, raw, content); reason != "" {
-		p.logSkip(reason, event.Backend, mime, len(content), elapsed, merged)
-		return
-	}
-
-	if debugClipboard {
-		log.Printf("[CLIPBOARD] backend=%s mime=%s bytes=%d read=%v merged=%d id=%s maxConcurrentReads=%d",
-			event.Backend, mime, len(content), elapsed, merged, p.debugDigest(kind, content), p.maxReads.Load())
-	} else {
-		log.Printf("[CLIPBOARD] backend=%s mime=%s bytes=%d read=%v merged=%d", event.Backend, mime, len(content), elapsed, merged)
-	}
 	change := ClipboardChange{Timestamp: p.now().Unix(), Mime: mime, Content: content, Generation: event.Generation}
-	select {
-	case p.output <- change:
-	case <-stop:
+	replaced, coalesced := p.dedupQueue.notify(clipboardDedupTask{
+		change: change, raw: raw, backend: event.Backend, read: elapsed, merged: merged,
+	})
+	if coalesced {
+		p.logSkip("dedup-queue-coalesced", replaced.backend, replaced.change.Mime,
+			len(replaced.change.Content), replaced.read, replaced.merged)
 	}
 }
 
@@ -425,20 +537,21 @@ func (p *clipboardProcessor) duplicateReason(kind string, raw [sha256.Size]byte,
 
 	newEntry := clipboardFingerprintEntry{kind: kind, raw: raw, at: now}
 	if kind == "image" && p.cfg.ImagePixelDedup {
+		newEntry.imageKey, newEntry.imageKeyOK = clipboardImageIdentity(content)
 		for i := range p.fingerprints {
 			entry := &p.fingerprints[i]
-			if entry.kind != "image" {
+			if entry.kind != "image" || !newEntry.imageKeyOK || !entry.imageKeyOK || entry.imageKey != newEntry.imageKey {
 				continue
 			}
 			if !newEntry.pixelTried {
-				newEntry.pixel, newEntry.pixelOK = p.pixelFingerprint(content)
+				newEntry.pixel, newEntry.pixelOK = p.pixelHash(content)
 				newEntry.pixelTried = true
 				if !newEntry.pixelOK {
 					break
 				}
 			}
 			if !entry.pixelTried && len(entry.imageData) > 0 {
-				entry.pixel, entry.pixelOK = p.pixelFingerprint(entry.imageData)
+				entry.pixel, entry.pixelOK = p.pixelHash(entry.imageData)
 				entry.pixelTried = true
 				entry.imageData = nil
 			}
@@ -448,7 +561,7 @@ func (p *clipboardProcessor) duplicateReason(kind string, raw [sha256.Size]byte,
 			}
 		}
 		if !newEntry.pixelTried {
-			newEntry.imageData = append([]byte(nil), content...)
+			newEntry.imageData = content
 		}
 	}
 	p.fingerprints = append(p.fingerprints, newEntry)
@@ -456,6 +569,14 @@ func (p *clipboardProcessor) duplicateReason(kind string, raw [sha256.Size]byte,
 		p.fingerprints = append([]clipboardFingerprintEntry(nil), p.fingerprints[len(p.fingerprints)-16:]...)
 	}
 	return ""
+}
+
+func clipboardImageIdentity(content []byte) (clipboardImageKey, bool) {
+	config, format, err := image.DecodeConfig(bytes.NewReader(content))
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return clipboardImageKey{}, false
+	}
+	return clipboardImageKey{format: format, width: config.Width, height: config.Height}, true
 }
 
 func clipboardPixelFingerprint(content []byte) ([sha256.Size]byte, bool) {

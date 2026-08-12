@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"image"
 	"image/color"
 	"image/png"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -138,6 +140,54 @@ func TestClipboardProcessorPixelExactDedup(t *testing.T) {
 	third := encodeTestPNG(t, changed, png.BestCompression)
 	processor.Notify(staticClipboardEvent(3, "image/png", third))
 	waitClipboardChange(t, changes)
+}
+
+func TestClipboardProcessorPixelDedupDoesNotBlockCapture(t *testing.T) {
+	cfg := testClipboardConfig()
+	changes := make(chan ClipboardChange, 16)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	processor := newClipboardProcessor(cfg, changes)
+	go func() {
+		defer close(done)
+		processor.Run(stop)
+	}()
+	defer stopTestClipboardProcessor(t, stop, done)
+
+	base := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	base.Set(1, 1, color.RGBA{R: 255, G: 32, A: 255})
+	first := encodeTestPNG(t, base, png.NoCompression)
+	second := encodeTestPNG(t, base, png.BestCompression)
+	processor.Notify(staticClipboardEvent(1, "image/png", first))
+	waitClipboardChange(t, changes)
+
+	pixelStarted := make(chan struct{})
+	releasePixel := make(chan struct{})
+	var startOnce sync.Once
+	processor.pixelHash = func(content []byte) ([sha256.Size]byte, bool) {
+		startOnce.Do(func() { close(pixelStarted) })
+		<-releasePixel
+		return clipboardPixelFingerprint(content)
+	}
+	processor.Notify(staticClipboardEvent(2, "image/png", second))
+	waitTestSignal(t, pixelStarted, "后台像素去重开始")
+
+	textRead := make(chan struct{})
+	processor.Notify(clipboardPlatformEvent{
+		Generation: 3,
+		MIMEs:      []string{"text/plain"},
+		Backend:    "test",
+		Read: func(context.Context, string, int64) (string, []byte, error) {
+			close(textRead)
+			return "text/plain", []byte("latest"), nil
+		},
+	})
+	waitTestSignal(t, textRead, "像素去重期间读取后续剪贴板")
+	close(releasePixel)
+
+	if got := string(waitClipboardChange(t, changes).Content); got != "latest" {
+		t.Fatalf("后台去重后的内容 = %q，期望 latest", got)
+	}
 }
 
 func TestClipboardProcessorSuppressesContentBoundEcho(t *testing.T) {

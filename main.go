@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -104,20 +105,8 @@ func changeEvent(change ClipboardChange) {
 		return
 	}
 
-	msg, err := ProcessClipboardChange(change)
-	if err != nil {
-		log.Printf("Error processing clipboard change: %v", err)
-		return
-	}
-	if msg == nil {
-		return
-	}
-
-	msg.SendTime = float64(time.Now().Unix()) + float64(time.Now().UnixNano())/1e9 - float64(time.Now().Unix())
-
-	// Route through forward engine
 	if forwardEngine != nil {
-		forwardEngine.ProcessMessage("system", *msg)
+		forwardEngine.EnqueueClipboardChange(change)
 	}
 }
 
@@ -253,6 +242,7 @@ func runStart(configPath, receivedWriteText, receivedImageFile string) {
 		case status, ok := <-clipboardChanges:
 			if !ok {
 				log.Print("[CLIPBOARD] processor stopped")
+				shutdownForwardEngine(5 * time.Second)
 				return
 			}
 			changeEvent(status)
@@ -263,11 +253,23 @@ func runStart(configPath, receivedWriteText, receivedImageFile string) {
 			if !waitClipboardWorkers(5 * time.Second) {
 				log.Print("[CLIPBOARD] worker shutdown exceeded 5 seconds")
 			}
+			shutdownForwardEngine(5 * time.Second)
 			log.Println("Closing all MQTT connections...")
 			CloseAllMQTTClients()
 			log.Println("Shutdown complete.")
 			return
 		}
+	}
+}
+
+func shutdownForwardEngine(timeout time.Duration) {
+	if forwardEngine == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := forwardEngine.Shutdown(ctx); err != nil {
+		log.Printf("[FORWARD] shutdown error=%v", err)
 	}
 }
 

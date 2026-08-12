@@ -68,7 +68,7 @@ func startLocalServer() {
 
 		// Route through forward engine with "http" as source ID
 		if forwardEngine != nil {
-			go forwardEngine.ProcessMessage("http", msg)
+			go forwardEngine.DispatchMessage("http", msg)
 		}
 
 		_, _ = w.Write([]byte("ok"))
