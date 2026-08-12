@@ -7,6 +7,14 @@ device:
   allowedInterfacePatterns: "eth*,enp*,wlp*"  # 允许的网卡名称模式
   maxRuntime: 3600                   # 剪贴板监听器最大运行时间(秒)，超时后自动重启
 
+# 剪贴板采集、去重与回声抑制
+clipboard:
+  backend: auto                      # auto | native | command；Linux Wayland 默认优先原生
+  dedupWindowMs: 5000                # 去重窗口，0 仅关闭跨事件去重
+  readTimeoutMs: 5000                # 单次读取超时，允许 500～60000
+  maxContentBytes: 134217728         # 单次内容上限，允许 1 MiB～1 GiB
+  imagePixelDedup: true              # 精确识别像素相同但编码不同的图片
+
 # 调试模式 (也可通过 CLIPBOARD_DEBUG=1 环境变量启用)
 debug: false
 

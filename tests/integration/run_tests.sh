@@ -506,6 +506,8 @@ targets:
 forward:
   - from: ["http"]
     to: ["system", "http-dest"]
+  - from: ["system"]
+    to: ["http-dest"]
 EOF
 
     local before_count=$(python3 -c "
@@ -518,10 +520,11 @@ print(d['count'])
     local app_pid=$!
     sleep 3
 
-    # Send message with same device name (should be filtered)
+    # Write a remote message locally and forward it once. The clipboard event
+    # caused by the local write must be suppressed rather than forwarded again.
     python3 -c "
 import json, base64, time
-msg = {'time': time.time(), 'uuid': 'echo-test', 'deviceName': '${DEVICE_NAME}',
+msg = {'time': time.time(), 'uuid': 'echo-test', 'deviceName': 'remote-device',
        'mime': 'text/plain', 'type': 'text',
        'content': base64.b64encode(b'Echo test').decode(),
        'sendTime': time.time()}
@@ -537,10 +540,11 @@ print(d['count'])
 
     kill $app_pid 2>/dev/null; wait $app_pid 2>/dev/null || true
 
-    if [ "$before_count" = "$after_count" ]; then
-        log_pass "own message was filtered"
+    local forwarded_count=$((after_count - before_count))
+    if [ "$forwarded_count" = "1" ]; then
+        log_pass "local clipboard echo was suppressed (forwarded once)"
     else
-        log_fail "own message was NOT filtered (before=$before_count, after=$after_count)"
+        log_fail "expected one direct forward and no clipboard echo, got $forwarded_count (before=$before_count, after=$after_count)"
     fi
 }
 

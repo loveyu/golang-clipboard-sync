@@ -9,19 +9,21 @@ Cross-platform clipboard synchronization tool with flexible MQTT and HTTP multi-
 - **YAML Configuration**: Unified config file for all parameters, supports remote config download
 - **Multi-protocol**: MQTT (pub/sub) and HTTP (push) protocols
 - **Cross-platform**: Linux (X11/Wayland), macOS, Windows
+- **Native Wayland**: Pure Go, single data-control connection with no Cgo or runtime `libwayland`
+- **Reliable deduplication**: Raw-content and pixel-exact image deduplication plus content-bound echo suppression
 - **Forward Engine**: Flexible message routing with multi-source/multi-target and automatic deduplication
 - **V2 Relay Protocol**: Large files relayed via HTTP center server; MQTT only transmits a reference
 - **Certificate Support**: Custom CA and mTLS client certificates
 - **Network Filtering**: Filter by local IP subnet or interface name patterns
 - **Connection Pooling**: MQTT connections shared by broker+credentials
-- **Auto-restart**: Exponential back-off restart after listener exits
+- **Automatic recovery**: Exponential back-off reconnect for native connections and command listeners
 
 ## Quick Start
 
 ### Requirements
 
 - Go 1.24+
-- Linux: xclip/xsel (X11) or wl-clipboard (Wayland)
+- Linux: xclip/xsel for X11; native Wayland has no external dependency and falls back to wl-clipboard when data-control is unavailable
 - macOS: pbcopy/pbpaste, osascript (bundled with macOS)
 - Windows: no extra dependencies
 
@@ -40,6 +42,13 @@ device:
   name: "my-device"
   allowedInterfacePatterns: "eth*,enp*,wlp*"
   maxRuntime: 3600
+
+clipboard:
+  backend: auto
+  dedupWindowMs: 5000
+  readTimeoutMs: 5000
+  maxContentBytes: 134217728
+  imagePixelDedup: true
 
 debug: false
 
@@ -81,6 +90,7 @@ forward:
 |----------|-------------|
 | `CLIPBOARD_CONFIG_PATH` | Config file path, default `config.yaml` |
 | `CLIPBOARD_DEBUG` | Debug mode, set to `1` to enable |
+| `CLIPBOARD_BACKEND` | Override the backend with `auto`, `native`, or `command` |
 | `REMOTE_CONFIG_URL` | Remote config URL (for `download-config` command) |
 
 ## Configuration Reference
@@ -93,6 +103,30 @@ device:
   allowedInterfacePatterns: "eth*,enp*" # Interface name filter (wildcards)
   maxRuntime: 3600                      # Max listener runtime in seconds before auto-restart
 ```
+
+### clipboard
+
+```yaml
+clipboard:
+  backend: auto
+  dedupWindowMs: 5000
+  readTimeoutMs: 5000
+  maxContentBytes: 134217728
+  imagePixelDedup: true
+```
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `backend` | `auto`, `native`, or `command`; native applies to Wayland data-control | `auto` |
+| `dedupWindowMs` | Raw and pixel-exact deduplication window (0–60000 ms) | `5000` |
+| `readTimeoutMs` | Per-selection read timeout (500–60000 ms) | `5000` |
+| `maxContentBytes` | Per-selection limit (1 MiB–1 GiB) | `134217728` |
+| `imagePixelDedup` | Compare exact decoded pixels when image encodings differ | `true` |
+
+On Linux Wayland, `auto` prefers `ext_data_control_manager_v1`, then
+`zwlr_data_control_manager_v1`, and falls back to the command backend if native initialization is unavailable.
+Runtime disconnects reconnect at 1, 2, 4, 8, 16, 30, then at most 60 seconds.
+Set `CLIPBOARD_BACKEND=command` for an immediate rollback.
 
 ### http — Local HTTP Server
 

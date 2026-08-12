@@ -9,19 +9,21 @@
 - **YAML 配置**: 统一的配置文件管理所有参数，支持远程配置下载
 - **多协议支持**: MQTT（发布/订阅）和 HTTP（推送）协议
 - **跨平台**: Linux（X11/Wayland）、macOS、Windows
+- **原生 Wayland**: 纯 Go data-control 单连接，无 CGO 或 `libwayland` 运行时依赖
+- **可靠去重**: 5 秒原始内容去重、图片像素精确去重、内容绑定的回声抑制
 - **转发规则引擎**: 灵活的消息路由，支持多源多目标、自动去重
 - **V2 中继协议**: 大文件通过 HTTP 中心服务器中继，MQTT 仅传输引用
 - **证书支持**: 自定义 CA、mTLS 客户端证书
 - **网络过滤**: 根据本地 IP 网段和网卡名称过滤
 - **连接池**: MQTT 连接按 broker+credentials 共享复用
-- **自动重启**: 监听进程异常退出后指数退避重启
+- **自动恢复**: 原生连接或命令监听器异常后指数退避重连
 
 ## 快速开始
 
 ### 环境要求
 
 - Go 1.24+
-- Linux: xclip/xsel（X11）或 wl-clipboard（Wayland）
+- Linux: X11 需要 xclip/xsel；Wayland 原生 data-control 无外部依赖，不支持时自动回退到 wl-clipboard
 - macOS: pbcopy/pbpaste、osascript（系统自带）
 - Windows: 无特殊依赖
 
@@ -40,6 +42,13 @@ device:
   name: "my-device"
   allowedInterfacePatterns: "eth*,enp*,wlp*"
   maxRuntime: 3600
+
+clipboard:
+  backend: auto
+  dedupWindowMs: 5000
+  readTimeoutMs: 5000
+  maxContentBytes: 134217728
+  imagePixelDedup: true
 
 debug: false
 
@@ -81,6 +90,7 @@ forward:
 |------|------|
 | `CLIPBOARD_CONFIG_PATH` | 配置文件路径，默认 `config.yaml` |
 | `CLIPBOARD_DEBUG` | 调试模式，设为 `1` 启用 |
+| `CLIPBOARD_BACKEND` | 覆盖配置的后端：`auto`、`native` 或 `command` |
 | `REMOTE_CONFIG_URL` | 远程配置下载 URL（用于 `download-config` 命令） |
 
 ## 配置详解
@@ -93,6 +103,29 @@ device:
   allowedInterfacePatterns: "eth*,enp*" # 网卡名称过滤（通配符）
   maxRuntime: 3600                      # 监听器最大运行时间(秒)
 ```
+
+### clipboard - 采集与去重
+
+```yaml
+clipboard:
+  backend: auto
+  dedupWindowMs: 5000
+  readTimeoutMs: 5000
+  maxContentBytes: 134217728
+  imagePixelDedup: true
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `backend` | `auto`、`native`、`command`；`native` 仅适用于支持 data-control 的 Wayland | `auto` |
+| `dedupWindowMs` | 原始内容和图片像素去重窗口，范围 0～60000ms | `5000` |
+| `readTimeoutMs` | 单次读取超时，范围 500～60000ms | `5000` |
+| `maxContentBytes` | 单次内容上限，范围 1 MiB～1 GiB | `134217728` |
+| `imagePixelDedup` | 对原始编码不同的图片进行像素精确去重 | `true` |
+
+`auto` 在 Linux Wayland 上优先选择 `ext_data_control_manager_v1`，其次选择
+`zwlr_data_control_manager_v1`；初始化不可用时回退命令后端。运行中的原生连接断开会按
+1、2、4、8、16、30、60 秒退避重连。可临时设置 `CLIPBOARD_BACKEND=command` 一键回滚。
 
 ### http - 本地 HTTP 服务器
 

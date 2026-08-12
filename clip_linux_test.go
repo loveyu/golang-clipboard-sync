@@ -18,7 +18,7 @@ func TestListenClipboardChangesStopsMonitorBeforeTimedRestart(t *testing.T) {
 	var active atomic.Int32
 	var maxActive atomic.Int32
 
-	startMonitor := func(chan<- ClipboardChange) *clipboardMonitor {
+	startMonitor := func(func()) *clipboardMonitor {
 		starts.Add(1)
 		currentActive := active.Add(1)
 		for {
@@ -37,15 +37,17 @@ func TestListenClipboardChangesStopsMonitorBeforeTimedRestart(t *testing.T) {
 		}
 	}
 
-	changes := listenClipboardChanges(stop, 10*time.Millisecond, startMonitor)
+	processor := newClipboardProcessor(defaultClipboardConfig(), make(chan ClipboardChange, 1))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCommandClipboardSource(processor, stop, 10*time.Millisecond, startMonitor)
+	}()
 	waitForCondition(t, time.Second, func() bool { return starts.Load() >= 3 })
 	close(stop)
 
 	select {
-	case _, ok := <-changes:
-		if ok {
-			t.Fatal("监听通道在停止后仍返回数据")
-		}
+	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("监听器停止超时")
 	}
@@ -85,8 +87,8 @@ func TestWaylandMonitorTimedRestartDoesNotLeakProcess(t *testing.T) {
 	var starts atomic.Int32
 	var badProcessCount atomic.Bool
 	var observedProcessCount atomic.Int32
-	startMonitor := func(changes chan<- ClipboardChange) *clipboardMonitor {
-		monitor := startClipboardMonitorPipe(changes)
+	startMonitor := func(notify func()) *clipboardMonitor {
+		monitor := startClipboardMonitorPipe(notify)
 		processCount := countDirectChildProcesses("wl-paste")
 		if processCount != 1 {
 			observedProcessCount.Store(int32(processCount))
@@ -96,21 +98,23 @@ func TestWaylandMonitorTimedRestartDoesNotLeakProcess(t *testing.T) {
 		return monitor
 	}
 
-	changes := listenClipboardChanges(stop, 25*time.Millisecond, startMonitor)
+	processor := newClipboardProcessor(defaultClipboardConfig(), make(chan ClipboardChange, 1))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCommandClipboardSource(processor, stop, 25*time.Millisecond, startMonitor)
+	}()
 	waitForCondition(t, 2*time.Second, func() bool { return starts.Load() >= 4 })
 
 	if badProcessCount.Load() {
 		close(stop)
-		<-changes
+		<-done
 		t.Fatalf("监听器启动后的 wl-paste 子进程数 = %d，期望 1", observedProcessCount.Load())
 	}
 
 	close(stop)
 	select {
-	case _, ok := <-changes:
-		if ok {
-			t.Fatal("监听通道在停止后仍返回数据")
-		}
+	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Wayland 监听器停止超时")
 	}

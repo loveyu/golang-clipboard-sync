@@ -3,10 +3,29 @@
 ## 前置条件
 
 - Docker (用于运行 Mosquitto MQTT broker)
-- Go 1.19+
+- Go 1.24+
 - xclip (Linux 下可选，用于剪贴板写入)
 
 ## 快速测试
+
+### 剪贴板处理层与原生协议测试
+
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
+
+# 当前 KDE/Wayland 会话中的只读连接测试
+CLIPBOARD_WAYLAND_NATIVE_INTEGRATION=1 \
+  go test -run TestNativeWaylandConnectionIntegration -v ./internal/waylandclipboard
+
+# 强制验证命令后端监听进程轮换和回收
+CLIPBOARD_BACKEND=command CLIPBOARD_WAYLAND_INTEGRATION=1 \
+  go test -run TestWaylandMonitorTimedRestartDoesNotLeakProcess -v .
+```
+
+单元测试覆盖 generation 事件合并、最大读取并发为 1、原始与像素指纹去重、内容绑定回声抑制、
+读取超时/超限，以及 Wayland offer 的单 MIME 请求、FD 分段读取、取消和关闭。
 
 ### 自动测试脚本
 

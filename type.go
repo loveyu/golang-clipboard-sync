@@ -62,12 +62,12 @@ func V2ContentType(t string) string {
 // V2Content represents a parsed V2 relay content string.
 // Format: "clientId/msgId,centerId:xxx,sha1:xxxxx,length:1111,encoding:base64"
 type V2Content struct {
-	ClientID  string
-	MsgID     string
-	CenterID  string
-	SHA1      string
-	Length    int
-	Encoding  string // "base64" or "raw"
+	ClientID string
+	MsgID    string
+	CenterID string
+	SHA1     string
+	Length   int
+	Encoding string // "base64" or "raw"
 }
 
 // ParseV2Content parses a V2 relay content string.
@@ -130,7 +130,8 @@ type ClipboardMessage struct {
 
 // ClipboardChange represents a clipboard change event with timestamp and content
 type ClipboardChange struct {
-	Timestamp int64  `json:"timestamp"`
-	Mime      string `json:"mime"`
-	Content   []byte `json:"content"`
+	Timestamp  int64  `json:"timestamp"`
+	Mime       string `json:"mime"`
+	Content    []byte `json:"content"`
+	Generation uint64 `json:"generation,omitempty"`
 }

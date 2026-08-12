@@ -18,10 +18,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -44,12 +46,17 @@ var (
 	dispatchMessageW              = userDLL.NewProc("DispatchMessageW")
 	translateMessage              = userDLL.NewProc("TranslateMessage")
 	defWindowProcW                = userDLL.NewProc("DefWindowProcW")
+	postMessageW                  = userDLL.NewProc("PostMessageW")
+	postQuitMessage               = userDLL.NewProc("PostQuitMessage")
+	getClipboardSequenceNumber    = userDLL.NewProc("GetClipboardSequenceNumber")
 	getModuleHandleW              = kernel32DLL.NewProc("GetModuleHandleW")
 	messageBoxW                   = userDLL.NewProc("MessageBoxW")
 )
 
 const (
 	WM_CLIPBOARDUPDATE = 0x031D
+	WM_CLOSE           = 0x0010
+	WM_DESTROY         = 0x0002
 	WS_EX_TOOLWINDOW   = 0x00000080
 	WS_EX_NOACTIVATE   = 0x08000000
 	WS_POPUP           = 0x80000000
@@ -125,8 +132,12 @@ func wndProcCallback(hWnd windows.Handle, Msg uint32, wParam uintptr, lParam uin
 	switch Msg {
 	case WM_CLIPBOARDUPDATE:
 		if clipboardNotify != nil {
-			clipboardNotify()
+			sequence, _, _ := getClipboardSequenceNumber.Call()
+			clipboardNotify(uint64(uint32(sequence)))
 		}
+	case WM_DESTROY:
+		postQuitMessage.Call(0)
+		return 0
 	}
 	r, _, _ := defWindowProcW.Call(uintptr(hWnd), uintptr(Msg), wParam, lParam)
 	return r
@@ -172,11 +183,31 @@ func SetClipboardContentImage(image []byte) error {
 	return nil
 }
 
+func currentClipboardGeneration() uint64 {
+	sequence, _, _ := getClipboardSequenceNumber.Call()
+	return uint64(uint32(sequence))
+}
+
 // ListenClipboardChanges 监听剪贴板返回
 func ListenClipboardChanges() <-chan ClipboardChange {
 	changes := make(chan ClipboardChange, 1)
-
-	go runMessageLoop(changes)
+	processor := newClipboardProcessor(appConfig.Clipboard, changes)
+	setActiveClipboardProcessor(processor)
+	startClipboardWorker(func() {
+		processor.Run(stopCh)
+		setActiveClipboardProcessor(nil)
+		close(changes)
+	})
+	ready := make(chan error, 1)
+	startClipboardWorker(func() { runMessageLoop(processor, ready) })
+	select {
+	case err := <-ready:
+		if err != nil {
+			log.Fatalf("创建 Windows 剪贴板监听器失败: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		log.Fatal("创建 Windows 剪贴板监听器超时")
+	}
 
 	log.Println("开始监听剪贴板变化 (Windows native)")
 
@@ -184,18 +215,23 @@ func ListenClipboardChanges() <-chan ClipboardChange {
 }
 
 // clipboardNotify sends a notification that clipboard changed
-var clipboardNotify func()
+var clipboardNotify func(uint64)
 
-func runMessageLoop(changes chan<- ClipboardChange) {
+func runMessageLoop(processor *clipboardProcessor, ready chan<- error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	var readyOnce sync.Once
+	reportReady := func(err error) {
+		readyOnce.Do(func() { ready <- err })
+	}
+	defer reportReady(fmt.Errorf("message loop exited before listener was ready"))
 
 	callback := windows.NewCallback(wndProcCallback)
 	wndProc = callback
 
 	instanceRaw, _, err := getModuleHandleW.Call(0)
 	if instanceRaw == 0 {
-		log.Printf("获取模块handle失败: %v", err)
+		reportReady(fmt.Errorf("获取模块 handle: %w", err))
 		return
 	}
 	instance := windows.Handle(instanceRaw)
@@ -217,7 +253,7 @@ func runMessageLoop(changes chan<- ClipboardChange) {
 
 	ret, _, _ := registerClassW.Call(uintptr(unsafe.Pointer(&wndClass)))
 	if ret == 0 {
-		log.Printf("注册窗口类失败: %v", windows.GetLastError())
+		reportReady(fmt.Errorf("注册窗口类: %w", windows.GetLastError()))
 		return
 	}
 
@@ -235,45 +271,44 @@ func runMessageLoop(changes chan<- ClipboardChange) {
 	)
 	hwnd = windows.Handle(hwndRaw)
 	if hwnd == 0 {
-		log.Printf("创建窗口失败: %v", windows.GetLastError())
+		reportReady(fmt.Errorf("创建窗口: %w", windows.GetLastError()))
 		return
 	}
 
 	ret, _, _ = addClipboardFormatListener.Call(uintptr(hwnd))
 	if ret == 0 {
-		log.Printf("注册剪贴板监听失败: %v", windows.GetLastError())
+		reportReady(fmt.Errorf("注册剪贴板监听: %w", windows.GetLastError()))
 		destroyWindow.Call(uintptr(hwnd))
 		return
 	}
-
 	log.Printf("剪贴板监听窗口已创建: %d", hwnd)
 
-	events := make(chan struct{}, 1)
-	workerStopCh := make(chan struct{})
-	workerDoneCh := make(chan struct{})
-	go func() {
-		defer close(workerDoneCh)
-		consumeClipboardEvents(events, workerStopCh, clipboardEventDebounce, func() {
-			change := readWindowsClipboardChange()
-			select {
-			case changes <- change:
-			default:
-			}
-		})
-	}()
 	defer func() {
 		clipboardNotify = nil
-		close(workerStopCh)
-		<-workerDoneCh
 	}()
 
-	clipboardNotify = func() {
-		notifyClipboardEvent(events)
+	clipboardNotify = func(sequence uint64) {
+		processor.Notify(clipboardPlatformEvent{
+			Generation: sequence,
+			Backend:    "native-windows",
+			Read:       readWindowsClipboardSelection,
+		})
 	}
+	go func() {
+		<-stopCh
+		if hwnd != 0 {
+			postMessageW.Call(uintptr(hwnd), WM_CLOSE, 0, 0)
+		}
+	}()
+	reportReady(nil)
 
 	var msg msg
 	for {
 		ret, _, _ := getMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
+		if int32(ret) == -1 {
+			log.Printf("GetMessageW 失败: %v", windows.GetLastError())
+			break
+		}
 		if ret == 0 {
 			break
 		}
@@ -285,65 +320,37 @@ func runMessageLoop(changes chan<- ClipboardChange) {
 	destroyWindow.Call(uintptr(hwnd))
 }
 
-func readWindowsClipboardChange() ClipboardChange {
+func readWindowsClipboardSelection(ctx context.Context, _ string, maxBytes int64) (string, []byte, error) {
 	if debugClipboard {
 		log.Printf("剪贴板内容变化，正在串行处理...")
 	}
 
-	mime := "text/plain"
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+	mime := ""
 	var content []byte
 
-	// 使用Windows API检测剪贴板格式，比直接读取更高效
-	if ok, _, _ := isClipboardFormatAvailable.Call(CF_HDROP); ok != 0 {
-		mime = "application/x-file-list"
-		// 优先读取图片内容，然后识别是否为图片
+	// Images have priority when applications publish both bitmap and text
+	// representations of one selection.
+	if ok, _, _ := isClipboardFormatAvailable.Call(CF_BITMAP); ok != 0 {
+		mime = "image/png"
 		content = clipboard.Read(clipboard.FmtImage)
-		if len(content) > 0 {
-			mime = "image/png"
-		}
-	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_UNICODETEXT); ok != 0 {
-		mime = "text/plain"
-		content = clipboard.Read(clipboard.FmtText)
-	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_BITMAP); ok != 0 {
+	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_DIBV5); ok != 0 {
 		mime = "image/png"
 		content = clipboard.Read(clipboard.FmtImage)
 	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_DIB); ok != 0 {
-		mime = "image/bmp"
+		mime = "image/png"
 		content = clipboard.Read(clipboard.FmtImage)
-	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_ENHMETAFILE); ok != 0 {
-		mime = "image/emf"
-		content = clipboard.Read(clipboard.FmtImage)
-	} else {
-		// 回退：尝试读取内容
+	} else if ok, _, _ := isClipboardFormatAvailable.Call(CF_UNICODETEXT); ok != 0 {
+		mime = "text/plain"
 		content = clipboard.Read(clipboard.FmtText)
-		imageContent := clipboard.Read(clipboard.FmtImage)
-		if len(imageContent) > 0 {
-			mime = "image/png"
-			content = imageContent
-		} else if len(content) > 0 {
-			mime = "text/plain"
-		} else {
-			mime = "unknown"
-		}
 	}
-
-	if debugClipboard {
-		displayContent := string(content)
-		if len(displayContent) > 100 {
-			displayContent = displayContent[:100] + "..."
-		}
-		log.Printf("[DEBUG] 剪贴板变更 - MIME: %s, 内容长度: %d, 内容: %s",
-			mime, len(content), displayContent)
+	if err := ctx.Err(); err != nil {
+		return mime, nil, err
 	}
-	return ClipboardChange{
-		Timestamp: time.Now().Unix(),
-		Mime:      mime,
-		Content:   content,
+	if int64(len(content)) > maxBytes {
+		return mime, nil, errClipboardContentTooLarge
 	}
-}
-
-func debugLog(format string, args ...interface{}) {
-	if debugClipboard {
-		log.Printf("[DEBUG] "+format, args...)
-	}
+	return mime, content, nil
 }

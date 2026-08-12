@@ -15,21 +15,71 @@ import (
 
 // Config is the top-level YAML configuration.
 type Config struct {
-	Device       DeviceConfig  `yaml:"device"`
-	Debug        bool          `yaml:"debug"`
-	HTTP         HTTPConfig    `yaml:"http"`
-	RemoteConfig string        `yaml:"remoteConfig"`
-	Certificates []Certificate `yaml:"certificates"`
-	Centers      []Center      `yaml:"centers"`
-	Listen       []ListenEntry `yaml:"listen"`
-	Targets      []TargetEntry `yaml:"targets"`
-	Forward      []ForwardRule `yaml:"forward"`
+	Device       DeviceConfig    `yaml:"device"`
+	Clipboard    ClipboardConfig `yaml:"clipboard"`
+	Debug        bool            `yaml:"debug"`
+	HTTP         HTTPConfig      `yaml:"http"`
+	RemoteConfig string          `yaml:"remoteConfig"`
+	Certificates []Certificate   `yaml:"certificates"`
+	Centers      []Center        `yaml:"centers"`
+	Listen       []ListenEntry   `yaml:"listen"`
+	Targets      []TargetEntry   `yaml:"targets"`
+	Forward      []ForwardRule   `yaml:"forward"`
 
 	// Resolved lookup maps (populated by LoadConfig)
 	certByID   map[string]*Certificate
 	centerByID map[string]*Center
 	listenByID map[string]*ListenEntry
 	targetByID map[string]*TargetEntry
+}
+
+const (
+	defaultClipboardBackend         = "auto"
+	defaultClipboardDedupWindowMS   = 5000
+	defaultClipboardReadTimeoutMS   = 5000
+	defaultClipboardMaxContentBytes = int64(128 * 1024 * 1024)
+)
+
+// ClipboardConfig controls clipboard acquisition, deduplication and echo
+// suppression. Zero values are populated by LoadConfig before YAML decoding.
+type ClipboardConfig struct {
+	Backend         string `yaml:"backend"`
+	DedupWindowMS   int    `yaml:"dedupWindowMs"`
+	ReadTimeoutMS   int    `yaml:"readTimeoutMs"`
+	MaxContentBytes int64  `yaml:"maxContentBytes"`
+	ImagePixelDedup bool   `yaml:"imagePixelDedup"`
+}
+
+func defaultClipboardConfig() ClipboardConfig {
+	return ClipboardConfig{
+		Backend:         defaultClipboardBackend,
+		DedupWindowMS:   defaultClipboardDedupWindowMS,
+		ReadTimeoutMS:   defaultClipboardReadTimeoutMS,
+		MaxContentBytes: defaultClipboardMaxContentBytes,
+		ImagePixelDedup: true,
+	}
+}
+
+func validateClipboardConfig(c *ClipboardConfig) error {
+	if backend := strings.TrimSpace(os.Getenv("CLIPBOARD_BACKEND")); backend != "" {
+		c.Backend = backend
+	}
+	c.Backend = strings.ToLower(strings.TrimSpace(c.Backend))
+	if c.Backend != "auto" && c.Backend != "native" && c.Backend != "command" {
+		return fmt.Errorf("clipboard.backend must be auto, native, or command, got %q", c.Backend)
+	}
+	if c.DedupWindowMS < 0 || c.DedupWindowMS > 60000 {
+		return fmt.Errorf("clipboard.dedupWindowMs must be between 0 and 60000, got %d", c.DedupWindowMS)
+	}
+	if c.ReadTimeoutMS < 500 || c.ReadTimeoutMS > 60000 {
+		return fmt.Errorf("clipboard.readTimeoutMs must be between 500 and 60000, got %d", c.ReadTimeoutMS)
+	}
+	const minContentBytes = int64(1024 * 1024)
+	const maxContentBytes = int64(1024 * 1024 * 1024)
+	if c.MaxContentBytes < minContentBytes || c.MaxContentBytes > maxContentBytes {
+		return fmt.Errorf("clipboard.maxContentBytes must be between %d and %d, got %d", minContentBytes, maxContentBytes, c.MaxContentBytes)
+	}
+	return nil
 }
 
 type DeviceConfig struct {
@@ -105,12 +155,16 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		HTTP: HTTPConfig{Port: ":9144"},
+		HTTP:      HTTPConfig{Port: ":9144"},
+		Clipboard: defaultClipboardConfig(),
 	}
 	cfg.Device.MaxRuntime = 3600
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := validateClipboardConfig(&cfg.Clipboard); err != nil {
+		return nil, err
 	}
 
 	// Build lookup maps

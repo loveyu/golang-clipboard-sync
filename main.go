@@ -29,13 +29,8 @@ import (
 )
 
 var (
-	enableClipboard bool
-	enableTimestamp time.Time
-	lock            = sync.Mutex{}
-	debugClipboard  bool
-
-	lastChangeContent []byte
-	lastChangeTime    time.Time
+	lock           = sync.Mutex{}
+	debugClipboard bool
 
 	stopping bool
 	stopCh   = make(chan struct{})
@@ -43,24 +38,27 @@ var (
 	forwardEngine *ForwardEngine
 )
 
-const disableDuration = 2 * time.Second
-
-var startTime = time.Now()
-
 func setClipboardContent(msg ClipboardMessage) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	enableClipboard = false
-
 	decoded, err := base64.StdEncoding.DecodeString(msg.Content)
 	if err != nil {
 		log.Printf("base64解码失败: %s", err)
-		enableClipboard = true
-		enableTimestamp = time.Now()
 		return
 	}
 
+	var mime string
+	switch BaseContentType(msg.Type) {
+	case "text":
+		mime = "text/plain"
+	case "image":
+		mime = "image/png"
+	default:
+		log.Printf("Unsupported clipboard content type: %s", msg.Type)
+		return
+	}
+	token := registerLocalClipboardWrite(mime, decoded)
 	switch BaseContentType(msg.Type) {
 	case "text":
 		err = SetClipboardContentText(string(decoded))
@@ -72,12 +70,8 @@ func setClipboardContent(msg ClipboardMessage) {
 		if err != nil {
 			log.Printf("写入图片到剪贴板失败: %s", err)
 		}
-	default:
-		log.Printf("Unsupported clipboard content type: %s", msg.Type)
 	}
-
-	enableClipboard = true
-	enableTimestamp = time.Now()
+	completeLocalClipboardWrite(token, currentClipboardGeneration(), err == nil)
 }
 
 // ProcessClipboardChange processes the clipboard change and returns ClipboardMessage.
@@ -110,37 +104,6 @@ func changeEvent(change ClipboardChange) {
 		return
 	}
 
-	if time.Since(startTime) < time.Second {
-		log.Println("Ignoring clipboard change within the first second.")
-		return
-	}
-
-	// Dedup
-	if appConfig != nil && appConfig.Device.Name != "" {
-		// Use global dedup
-	}
-	if lastChangeContent != nil && lastChangeTime.IsZero() == false {
-		if bytesEqual(change.Content, lastChangeContent) && time.Since(lastChangeTime) < time.Second {
-			debugLog("忽略重复剪贴板变更")
-			return
-		}
-	}
-	lastChangeContent = change.Content
-	lastChangeTime = time.Now()
-
-	if !enableClipboard {
-		log.Println("Clipboard reading is disabled.")
-		return
-	}
-
-	if time.Since(enableTimestamp) < disableDuration/4 {
-		return
-	}
-
-	if time.Since(enableTimestamp) < disableDuration {
-		return
-	}
-
 	msg, err := ProcessClipboardChange(change)
 	if err != nil {
 		log.Printf("Error processing clipboard change: %v", err)
@@ -156,18 +119,6 @@ func changeEvent(change ClipboardChange) {
 	if forwardEngine != nil {
 		forwardEngine.ProcessMessage("system", *msg)
 	}
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func main() {
@@ -275,6 +226,8 @@ func runStart(configPath, receivedWriteText, receivedImageFile string) {
 
 	// Initialize forward engine
 	forwardEngine = NewForwardEngine(cfg)
+	initClipboard()
+	clipboardChanges := ListenClipboardChanges()
 
 	// Initialize network monitor if needed
 	if needsInterfaceFilter() {
@@ -288,26 +241,28 @@ func runStart(configPath, receivedWriteText, receivedImageFile string) {
 	// Start local HTTP server
 	go startLocalServer()
 
-	enableClipboard = true
-	initClipboard()
-
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	clipboardChanges := ListenClipboardChanges()
-
 	for {
 		select {
-		case status := <-clipboardChanges:
+		case status, ok := <-clipboardChanges:
+			if !ok {
+				log.Print("[CLIPBOARD] processor stopped")
+				return
+			}
 			changeEvent(status)
 		case sig := <-sigCh:
 			log.Printf("Received signal: %v, shutting down...", sig)
 			stopping = true
+			close(stopCh)
+			if !waitClipboardWorkers(5 * time.Second) {
+				log.Print("[CLIPBOARD] worker shutdown exceeded 5 seconds")
+			}
 			log.Println("Closing all MQTT connections...")
 			CloseAllMQTTClients()
 			log.Println("Shutdown complete.")
-			close(stopCh)
 			return
 		}
 	}

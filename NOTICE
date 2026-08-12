@@ -9,9 +9,12 @@ Licensed under the Eclipse Public License 2.0
 See: https://github.com/eclipse/paho.mqtt.golang
 
 golang.design/x/clipboard
-Copyright (c) 2019 The golang.design Initiative Authors
+Copyright (c) 2019-2026 The golang.design Initiative Authors
 Licensed under the MIT License
 See: https://github.com/golang-design/clipboard
+
+The native Wayland wire protocol adapter in internal/waylandclipboard is
+adapted from golang.design/x/clipboard v0.8.0 and retains its MIT attribution.
 
 golang.org/x/sys
 Copyright (c) 2009-2024 The Go Authors
