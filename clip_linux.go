@@ -192,9 +192,9 @@ func ReadClipboardContent(mime string) ([]byte, error) {
 	return readClipboardContentX11(ctx, mime, appConfig.Clipboard.MaxContentBytes)
 }
 
-func SetClipboardContentText(content string) error {
+func SetClipboardContentText(content string, origin ...string) error {
 	if selectedLinuxBackend == linuxBackendNative {
-		return writeNativeClipboard("text/plain;charset=utf-8", []byte(content))
+		return writeNativeClipboard("text/plain;charset=utf-8", []byte(content), firstClipboardOrigin(origin))
 	}
 	if isWayland {
 		return runClipboardWriteCommand("wl-copy", []string{"--type", "text/plain;charset=utf-8"}, []byte(content))
@@ -202,9 +202,9 @@ func SetClipboardContentText(content string) error {
 	return runClipboardWriteCommand("xclip", []string{"-selection", "clipboard", "-t", "UTF8_STRING", "-i"}, []byte(content))
 }
 
-func SetClipboardContentImage(image []byte) error {
+func SetClipboardContentImage(image []byte, origin ...string) error {
 	if selectedLinuxBackend == linuxBackendNative {
-		return writeNativeClipboard("image/png", image)
+		return writeNativeClipboard("image/png", image, firstClipboardOrigin(origin))
 	}
 	if isWayland {
 		return runClipboardWriteCommand("wl-copy", []string{"--type", "image/png"}, image)
@@ -212,7 +212,7 @@ func SetClipboardContentImage(image []byte) error {
 	return runClipboardWriteCommand("xclip", []string{"-selection", "clipboard", "-t", "image/png", "-i"}, image)
 }
 
-func writeNativeClipboard(mime string, content []byte) error {
+func writeNativeClipboard(mime string, content []byte, origin string) error {
 	nativeMonitorState.RLock()
 	monitor := nativeMonitorState.monitor
 	nativeMonitorState.RUnlock()
@@ -221,6 +221,9 @@ func writeNativeClipboard(mime string, content []byte) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(appConfig.Clipboard.ReadTimeoutMS)*time.Millisecond)
 	defer cancel()
+	if origin != "" {
+		return monitor.WriteWithOrigin(ctx, mime, content, clipboardOriginMIME, []byte(origin))
+	}
 	return monitor.Write(ctx, mime, content)
 }
 

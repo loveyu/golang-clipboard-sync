@@ -196,6 +196,41 @@ func TestCancelledSourceSendConsumesItsDescriptor(t *testing.T) {
 	}
 }
 
+func TestSourceServesOriginMarkerWithoutImagePayload(t *testing.T) {
+	monitor, server := newProtocolTestMonitor(t)
+	defer monitor.Close()
+	defer server.Close()
+
+	const sourceID uint32 = 72
+	const originMIME = "application/x-clipboard-sync-origin"
+	monitor.sourcesMu.Lock()
+	monitor.sources[sourceID] = source{
+		mimes:      map[string]struct{}{"image/png": {}, originMIME: {}},
+		data:       []byte("large-image-payload"),
+		originMIME: originMIME,
+		originData: []byte("origin-token"),
+	}
+	monitor.sourcesMu.Unlock()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := protocolMessage(sourceID, srcEvtSend, encodeString(originMIME))
+	if _, _, err := server.WriteMsgUnix(message, syscall.UnixRights(int(writer.Fd())), nil); err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+	content, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "origin-token" {
+		t.Fatalf("origin marker = %q，期望 origin-token", content)
+	}
+}
+
 func TestNativeWaylandConnectionIntegration(t *testing.T) {
 	if os.Getenv("CLIPBOARD_WAYLAND_NATIVE_INTEGRATION") != "1" {
 		t.Skip("设置 CLIPBOARD_WAYLAND_NATIVE_INTEGRATION=1 后运行原生 Wayland 连接测试")

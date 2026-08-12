@@ -14,6 +14,7 @@ import (
 func testClipboardConfig() ClipboardConfig {
 	cfg := defaultClipboardConfig()
 	cfg.ReadTimeoutMS = 500
+	cfg.ImageReadDelayMS = 0
 	return cfg
 }
 
@@ -157,6 +158,52 @@ func TestClipboardProcessorSuppressesContentBoundEcho(t *testing.T) {
 	}
 }
 
+func TestClipboardProcessorSuppressesOriginBeforeImageRead(t *testing.T) {
+	cfg := testClipboardConfig()
+	cfg.ImageReadDelayMS = 0
+	processor, changes, stop, done := startTestClipboardProcessor(t, cfg)
+	defer stopTestClipboardProcessor(t, stop, done)
+
+	const token = "remote-image-write"
+	processor.registerEcho(token, "image/png", []byte("remote-image"))
+	processor.completeEcho(token, 20, true)
+	var markerReads atomic.Int32
+	var imageReads atomic.Int32
+	processor.Notify(clipboardPlatformEvent{
+		Generation: 20,
+		MIMEs:      []string{clipboardOriginMIME, "image/png"},
+		Backend:    "test",
+		Read: func(_ context.Context, mime string, _ int64) (string, []byte, error) {
+			if mime == clipboardOriginMIME {
+				markerReads.Add(1)
+				return mime, []byte(token), nil
+			}
+			imageReads.Add(1)
+			return mime, []byte("remote-image"), nil
+		},
+	})
+	waitForAtomicValue(t, &markerReads, 1)
+	assertNoClipboardChange(t, changes)
+	if got := imageReads.Load(); got != 0 {
+		t.Fatalf("来源标记匹配后仍读取图片 %d 次", got)
+	}
+}
+
+func TestClipboardProcessorImageDelayOnlyAppliesToImages(t *testing.T) {
+	cfg := testClipboardConfig()
+	cfg.ImageReadDelayMS = 200
+	processor := newClipboardProcessor(cfg, make(chan ClipboardChange, 1))
+	if got := processor.eventDelay(clipboardPlatformEvent{MIMEs: []string{"image/png"}}); got != 200*time.Millisecond {
+		t.Fatalf("图片读取延迟 = %v，期望 200ms", got)
+	}
+	if got := processor.eventDelay(clipboardPlatformEvent{MIMEs: []string{"text/plain"}}); got != 0 {
+		t.Fatalf("文本读取延迟 = %v，期望 0", got)
+	}
+	if got := processor.eventDelay(clipboardPlatformEvent{MIMEs: []string{"image/png"}, Debounce: 300 * time.Millisecond}); got != 300*time.Millisecond {
+		t.Fatalf("已有更长防抖时延迟 = %v，期望 300ms", got)
+	}
+}
+
 func TestClipboardProcessorReadTimeoutAndLimit(t *testing.T) {
 	cfg := testClipboardConfig()
 	cfg.MaxContentBytes = 1024 * 1024
@@ -237,4 +284,16 @@ func assertNoClipboardChangeFor(t *testing.T, changes <-chan ClipboardChange, du
 		t.Fatalf("意外收到剪贴板变更: mime=%s bytes=%d", change.Mime, len(change.Content))
 	case <-time.After(duration):
 	}
+}
+
+func waitForAtomicValue(t *testing.T, value *atomic.Int32, wanted int32) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if value.Load() == wanted {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("原子值 = %d，期望 %d", value.Load(), wanted)
 }

@@ -17,6 +17,7 @@ import (
 	_ "image/png"
 	"io"
 	"log"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,11 @@ import (
 )
 
 var errClipboardContentTooLarge = errors.New("clipboard content exceeds configured limit")
+
+const (
+	clipboardOriginMIME     = "application/x-clipboard-sync-origin"
+	clipboardOriginMaxBytes = 1024
+)
 
 // clipboardPlatformEvent describes a selection without reading its contents.
 // Platform callbacks only publish this lightweight value; Read is invoked by
@@ -117,6 +123,16 @@ type clipboardEchoEntry struct {
 	expiresAt  time.Time
 }
 
+type clipboardPixelTask struct {
+	content []byte
+	result  chan clipboardPixelResult
+}
+
+type clipboardPixelResult struct {
+	fingerprint [sha256.Size]byte
+	ok          bool
+}
+
 type clipboardProcessor struct {
 	cfg    ClipboardConfig
 	queue  *clipboardEventQueue
@@ -129,6 +145,8 @@ type clipboardProcessor struct {
 	hmacReady      bool
 	activeReads    atomic.Int32
 	maxReads       atomic.Int32
+	pixelTasks     chan clipboardPixelTask
+	pixelDone      chan struct{}
 
 	echoMu sync.Mutex
 	echo   *clipboardEchoEntry
@@ -136,10 +154,12 @@ type clipboardProcessor struct {
 
 func newClipboardProcessor(cfg ClipboardConfig, output chan<- ClipboardChange) *clipboardProcessor {
 	p := &clipboardProcessor{
-		cfg:    cfg,
-		queue:  newClipboardEventQueue(),
-		output: output,
-		now:    time.Now,
+		cfg:        cfg,
+		queue:      newClipboardEventQueue(),
+		output:     output,
+		now:        time.Now,
+		pixelTasks: make(chan clipboardPixelTask),
+		pixelDone:  make(chan struct{}),
 	}
 	if _, err := rand.Read(p.hmacKey[:]); err != nil {
 		log.Printf("[CLIPBOARD] 生成调试摘要密钥失败: %v", err)
@@ -154,6 +174,11 @@ func (p *clipboardProcessor) Notify(event clipboardPlatformEvent) {
 }
 
 func (p *clipboardProcessor) Run(stop <-chan struct{}) {
+	go p.runPixelWorker()
+	defer func() {
+		close(p.pixelTasks)
+		<-p.pixelDone
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -172,7 +197,8 @@ func (p *clipboardProcessor) Run(stop <-chan struct{}) {
 		if !ok {
 			continue
 		}
-		if event.Debounce > 0 {
+		if delay := p.eventDelay(event); delay > 0 {
+			event.Debounce = delay
 			event, merged, ok = p.waitForQuietPeriod(stop, event, merged)
 			if !ok {
 				return
@@ -180,6 +206,32 @@ func (p *clipboardProcessor) Run(stop <-chan struct{}) {
 		}
 		p.process(ctx, stop, event, merged)
 	}
+}
+
+func (p *clipboardProcessor) runPixelWorker() {
+	defer close(p.pixelDone)
+	for task := range p.pixelTasks {
+		fingerprint, ok := clipboardPixelFingerprint(task.content)
+		task.result <- clipboardPixelResult{fingerprint: fingerprint, ok: ok}
+	}
+}
+
+func (p *clipboardProcessor) pixelFingerprint(content []byte) ([sha256.Size]byte, bool) {
+	result := make(chan clipboardPixelResult, 1)
+	p.pixelTasks <- clipboardPixelTask{content: content, result: result}
+	value := <-result
+	return value.fingerprint, value.ok
+}
+
+func (p *clipboardProcessor) eventDelay(event clipboardPlatformEvent) time.Duration {
+	delay := event.Debounce
+	if clipboardContentKind(selectClipboardMIME(event.MIMEs)) == "image" {
+		imageDelay := time.Duration(p.cfg.ImageReadDelayMS) * time.Millisecond
+		if imageDelay > delay {
+			delay = imageDelay
+		}
+	}
+	return delay
 }
 
 func (p *clipboardProcessor) waitForQuietPeriod(stop <-chan struct{}, event clipboardPlatformEvent, merged int) (clipboardPlatformEvent, int, bool) {
@@ -239,6 +291,18 @@ func (p *clipboardProcessor) process(parent context.Context, stop <-chan struct{
 	timeout := time.Duration(p.cfg.ReadTimeoutMS) * time.Millisecond
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	if clipboardMIMEAvailable(event.MIMEs, clipboardOriginMIME) {
+		started := p.now()
+		_, marker, err := event.Read(ctx, clipboardOriginMIME, clipboardOriginMaxBytes)
+		elapsed := p.now().Sub(started)
+		if err == nil && p.consumeOrigin(string(marker), event.Generation) {
+			p.logSkip("local-origin", event.Backend, requestedMIME, 0, elapsed, merged)
+			return
+		}
+		if err != nil && debugClipboard {
+			log.Printf("[CLIPBOARD] backend=%s origin-marker-read-error=%v", event.Backend, err)
+		}
+	}
 
 	started := p.now()
 	active := p.activeReads.Add(1)
@@ -366,14 +430,14 @@ func (p *clipboardProcessor) duplicateReason(kind string, raw [sha256.Size]byte,
 				continue
 			}
 			if !newEntry.pixelTried {
-				newEntry.pixel, newEntry.pixelOK = clipboardPixelFingerprint(content)
+				newEntry.pixel, newEntry.pixelOK = p.pixelFingerprint(content)
 				newEntry.pixelTried = true
 				if !newEntry.pixelOK {
 					break
 				}
 			}
 			if !entry.pixelTried && len(entry.imageData) > 0 {
-				entry.pixel, entry.pixelOK = clipboardPixelFingerprint(entry.imageData)
+				entry.pixel, entry.pixelOK = p.pixelFingerprint(entry.imageData)
 				entry.pixelTried = true
 				entry.imageData = nil
 			}
@@ -399,16 +463,18 @@ func clipboardPixelFingerprint(content []byte) ([sha256.Size]byte, bool) {
 		return [sha256.Size]byte{}, false
 	}
 	bounds := img.Bounds()
-	rgba := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
-	draw.Draw(rgba, rgba.Bounds(), img, bounds.Min, draw.Src)
 	h := sha256.New()
 	var dimensions [16]byte
 	binary.LittleEndian.PutUint64(dimensions[0:8], uint64(bounds.Dx()))
 	binary.LittleEndian.PutUint64(dimensions[8:16], uint64(bounds.Dy()))
 	h.Write(dimensions[:])
+	row := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), 1))
 	for y := 0; y < bounds.Dy(); y++ {
-		start := y * rgba.Stride
-		h.Write(rgba.Pix[start : start+bounds.Dx()*4])
+		draw.Draw(row, row.Bounds(), img, image.Pt(bounds.Min.X, bounds.Min.Y+y), draw.Src)
+		h.Write(row.Pix[:bounds.Dx()*4])
+		if y%64 == 63 {
+			runtime.Gosched()
+		}
 	}
 	var sum [sha256.Size]byte
 	copy(sum[:], h.Sum(nil))
@@ -454,6 +520,22 @@ func supportedClipboardImageMIME(mime string) bool {
 	default:
 		return false
 	}
+}
+
+func clipboardMIMEAvailable(mimes []string, wanted string) bool {
+	for _, mime := range mimes {
+		if strings.EqualFold(strings.TrimSpace(mime), wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstClipboardOrigin(origins []string) string {
+	if len(origins) == 0 {
+		return ""
+	}
+	return origins[0]
 }
 
 func (p *clipboardProcessor) registerEcho(token, mime string, content []byte) {
@@ -508,6 +590,19 @@ func (p *clipboardProcessor) consumeEcho(kind string, raw [sha256.Size]byte, gen
 		p.echo = nil
 	}
 	return false
+}
+
+func (p *clipboardProcessor) consumeOrigin(token string, generation uint64) bool {
+	p.echoMu.Lock()
+	defer p.echoMu.Unlock()
+	if p.echo == nil || token == "" || p.echo.token != token {
+		return false
+	}
+	if p.now().After(p.echo.expiresAt) {
+		p.echo = nil
+		return false
+	}
+	return p.echo.generation == 0 || generation == 0 || generation >= p.echo.generation
 }
 
 func (p *clipboardProcessor) debugDigest(kind string, content []byte) string {

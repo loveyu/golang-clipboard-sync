@@ -47,6 +47,7 @@ clipboard:
   backend: auto
   dedupWindowMs: 5000
   readTimeoutMs: 5000
+  imageReadDelayMs: 200
   maxContentBytes: 134217728
   imagePixelDedup: true
 
@@ -111,6 +112,7 @@ clipboard:
   backend: auto
   dedupWindowMs: 5000
   readTimeoutMs: 5000
+  imageReadDelayMs: 200
   maxContentBytes: 134217728
   imagePixelDedup: true
 ```
@@ -120,6 +122,7 @@ clipboard:
 | `backend` | `auto`, `native`, or `command`; native applies to Wayland data-control | `auto` |
 | `dedupWindowMs` | Raw and pixel-exact deduplication window (0–60000 ms) | `5000` |
 | `readTimeoutMs` | Per-selection read timeout (500–60000 ms) | `5000` |
+| `imageReadDelayMs` | Image read delay for capture-path contention (0–2000 ms); text stays immediate | `200` |
 | `maxContentBytes` | Per-selection limit (1 MiB–1 GiB) | `134217728` |
 | `imagePixelDedup` | Compare exact decoded pixels when image encodings differ | `true` |
 
@@ -127,6 +130,9 @@ On Linux Wayland, `auto` prefers `ext_data_control_manager_v1`, then
 `zwlr_data_control_manager_v1`, and falls back to the command backend if native initialization is unavailable.
 Runtime disconnects reconnect at 1, 2, 4, 8, 16, 30, then at most 60 seconds.
 Set `CLIPBOARD_BACKEND=command` for an immediate rollback.
+The native backend waits `imageReadDelayMs` before reading an image so screenshot tools and clipboard
+managers finish their critical path first. Locally written selections include an origin marker, allowing
+matching echoes to be rejected without transferring or decoding the image; pixel deduplication remains a fallback.
 
 ### http — Local HTTP Server
 

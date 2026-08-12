@@ -34,29 +34,32 @@ type Config struct {
 }
 
 const (
-	defaultClipboardBackend         = "auto"
-	defaultClipboardDedupWindowMS   = 5000
-	defaultClipboardReadTimeoutMS   = 5000
-	defaultClipboardMaxContentBytes = int64(128 * 1024 * 1024)
+	defaultClipboardBackend          = "auto"
+	defaultClipboardDedupWindowMS    = 5000
+	defaultClipboardReadTimeoutMS    = 5000
+	defaultClipboardImageReadDelayMS = 200
+	defaultClipboardMaxContentBytes  = int64(128 * 1024 * 1024)
 )
 
 // ClipboardConfig controls clipboard acquisition, deduplication and echo
 // suppression. Zero values are populated by LoadConfig before YAML decoding.
 type ClipboardConfig struct {
-	Backend         string `yaml:"backend"`
-	DedupWindowMS   int    `yaml:"dedupWindowMs"`
-	ReadTimeoutMS   int    `yaml:"readTimeoutMs"`
-	MaxContentBytes int64  `yaml:"maxContentBytes"`
-	ImagePixelDedup bool   `yaml:"imagePixelDedup"`
+	Backend          string `yaml:"backend"`
+	DedupWindowMS    int    `yaml:"dedupWindowMs"`
+	ReadTimeoutMS    int    `yaml:"readTimeoutMs"`
+	ImageReadDelayMS int    `yaml:"imageReadDelayMs"`
+	MaxContentBytes  int64  `yaml:"maxContentBytes"`
+	ImagePixelDedup  bool   `yaml:"imagePixelDedup"`
 }
 
 func defaultClipboardConfig() ClipboardConfig {
 	return ClipboardConfig{
-		Backend:         defaultClipboardBackend,
-		DedupWindowMS:   defaultClipboardDedupWindowMS,
-		ReadTimeoutMS:   defaultClipboardReadTimeoutMS,
-		MaxContentBytes: defaultClipboardMaxContentBytes,
-		ImagePixelDedup: true,
+		Backend:          defaultClipboardBackend,
+		DedupWindowMS:    defaultClipboardDedupWindowMS,
+		ReadTimeoutMS:    defaultClipboardReadTimeoutMS,
+		ImageReadDelayMS: defaultClipboardImageReadDelayMS,
+		MaxContentBytes:  defaultClipboardMaxContentBytes,
+		ImagePixelDedup:  true,
 	}
 }
 
@@ -73,6 +76,9 @@ func validateClipboardConfig(c *ClipboardConfig) error {
 	}
 	if c.ReadTimeoutMS < 500 || c.ReadTimeoutMS > 60000 {
 		return fmt.Errorf("clipboard.readTimeoutMs must be between 500 and 60000, got %d", c.ReadTimeoutMS)
+	}
+	if c.ImageReadDelayMS < 0 || c.ImageReadDelayMS > 2000 {
+		return fmt.Errorf("clipboard.imageReadDelayMs must be between 0 and 2000, got %d", c.ImageReadDelayMS)
 	}
 	const minContentBytes = int64(1024 * 1024)
 	const maxContentBytes = int64(1024 * 1024 * 1024)

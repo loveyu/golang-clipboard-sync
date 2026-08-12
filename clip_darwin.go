@@ -168,14 +168,14 @@ func readClipboardImageDarwin(ctx context.Context, maxBytes int64) ([]byte, erro
 }
 
 // SetClipboardContentText sets text content to clipboard via pbcopy.
-func SetClipboardContentText(content string) error {
+func SetClipboardContentText(content string, _ ...string) error {
 	cmd := exec.Command("pbcopy")
 	cmd.Stdin = strings.NewReader(content)
 	return cmd.Run()
 }
 
 // SetClipboardContentImage sets image content to clipboard via JXA.
-func SetClipboardContentImage(image []byte) error {
+func SetClipboardContentImage(image []byte, _ ...string) error {
 	tmpFile, err := os.CreateTemp("", "clipboard_image_*.png")
 	if err != nil {
 		return err

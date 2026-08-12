@@ -411,8 +411,10 @@ func (s Selection) Release() {
 }
 
 type source struct {
-	mimes map[string]struct{}
-	data  []byte
+	mimes      map[string]struct{}
+	data       []byte
+	originMIME string
+	originData []byte
 }
 
 type sourceSend struct {
@@ -718,6 +720,7 @@ func (m *Monitor) tombstoneSource(sourceID uint32) {
 	value, ok := m.sources[sourceID]
 	if ok {
 		value.data = nil
+		value.originData = nil
 		m.sources[sourceID] = value
 	}
 	m.sourcesMu.Unlock()
@@ -738,6 +741,9 @@ func (m *Monitor) serveSource(sourceID uint32, body []byte) {
 		return
 	}
 	data := value.data
+	if mime == value.originMIME {
+		data = value.originData
+	}
 	file := os.NewFile(uintptr(fd), "clipboard-sync-wayland-send")
 	if file == nil {
 		_ = syscall.Close(fd)
@@ -780,6 +786,13 @@ func (m *Monitor) serveLoop() {
 // Write replaces the regular selection and serves it through this monitor's
 // existing data-control connection.
 func (m *Monitor) Write(ctx context.Context, mime string, data []byte) error {
+	return m.WriteWithOrigin(ctx, mime, data, "", nil)
+}
+
+// WriteWithOrigin replaces the regular selection and optionally advertises a
+// small origin marker beside the regular content. Consumers can read the
+// marker without transferring a large image payload.
+func (m *Monitor) WriteWithOrigin(ctx context.Context, mime string, data []byte, originMIME string, originData []byte) error {
 	m.writeMu.Lock()
 	defer m.writeMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -794,13 +807,21 @@ func (m *Monitor) Write(ctx context.Context, mime string, data []byte) error {
 	} else if strings.HasPrefix(strings.ToLower(mime), "image/") {
 		mimes = []string{"image/png"}
 	}
+	if originMIME != "" && len(originData) > 0 {
+		mimes = append(mimes, originMIME)
+	}
 	offered := make(map[string]struct{}, len(mimes))
 	for _, offeredMIME := range mimes {
 		offered[offeredMIME] = struct{}{}
 	}
 	sourceID := m.connection.newID()
 	m.sourcesMu.Lock()
-	m.sources[sourceID] = source{mimes: offered, data: append([]byte(nil), data...)}
+	m.sources[sourceID] = source{
+		mimes:      offered,
+		data:       append([]byte(nil), data...),
+		originMIME: originMIME,
+		originData: append([]byte(nil), originData...),
+	}
 	m.sourceIDs = append(m.sourceIDs, sourceID)
 	if len(m.sourceIDs) > 64 {
 		staleID := m.sourceIDs[0]

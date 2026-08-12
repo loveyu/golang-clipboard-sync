@@ -61,12 +61,12 @@ func setClipboardContent(msg ClipboardMessage) {
 	token := registerLocalClipboardWrite(mime, decoded)
 	switch BaseContentType(msg.Type) {
 	case "text":
-		err = SetClipboardContentText(string(decoded))
+		err = SetClipboardContentText(string(decoded), token)
 		if err != nil {
 			log.Printf("写入文本到剪贴板失败: %s", err)
 		}
 	case "image":
-		err = SetClipboardContentImage(decoded)
+		err = SetClipboardContentImage(decoded, token)
 		if err != nil {
 			log.Printf("写入图片到剪贴板失败: %s", err)
 		}
@@ -179,6 +179,9 @@ func runStart(configPath, receivedWriteText, receivedImageFile string) {
 		log.Fatalf("Failed to load config from %s: %v", path, err)
 	}
 	appConfig = cfg
+	if err := lowerProcessPriority(); err != nil {
+		log.Printf("[CLIPBOARD] lower-process-priority error=%v", err)
+	}
 
 	debugClipboard = IsDebug()
 	log.Printf("Config loaded from: %s, device: %s", path, cfg.Device.Name)

@@ -47,6 +47,7 @@ clipboard:
   backend: auto
   dedupWindowMs: 5000
   readTimeoutMs: 5000
+  imageReadDelayMs: 200
   maxContentBytes: 134217728
   imagePixelDedup: true
 
@@ -111,6 +112,7 @@ clipboard:
   backend: auto
   dedupWindowMs: 5000
   readTimeoutMs: 5000
+  imageReadDelayMs: 200
   maxContentBytes: 134217728
   imagePixelDedup: true
 ```
@@ -120,12 +122,15 @@ clipboard:
 | `backend` | `auto`、`native`、`command`；`native` 仅适用于支持 data-control 的 Wayland | `auto` |
 | `dedupWindowMs` | 原始内容和图片像素去重窗口，范围 0～60000ms | `5000` |
 | `readTimeoutMs` | 单次读取超时，范围 500～60000ms | `5000` |
+| `imageReadDelayMs` | 图片读取错峰延迟，范围 0～2000ms；文本不延迟 | `200` |
 | `maxContentBytes` | 单次内容上限，范围 1 MiB～1 GiB | `134217728` |
 | `imagePixelDedup` | 对原始编码不同的图片进行像素精确去重 | `true` |
 
 `auto` 在 Linux Wayland 上优先选择 `ext_data_control_manager_v1`，其次选择
 `zwlr_data_control_manager_v1`；初始化不可用时回退命令后端。运行中的原生连接断开会按
 1、2、4、8、16、30、60 秒退避重连。可临时设置 `CLIPBOARD_BACKEND=command` 一键回滚。
+原生后端会在读取图片前等待 `imageReadDelayMs`，使截图工具和 CopyQ 先完成关键路径；
+同步写入附带来源标记，匹配的本地回声无需传输和解码图片，像素去重仍作为兼容后备。
 
 ### http - 本地 HTTP 服务器
 

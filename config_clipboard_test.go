@@ -26,6 +26,7 @@ clipboard:
   backend: native
   dedupWindowMs: 0
   readTimeoutMs: 800
+  imageReadDelayMs: 350
   maxContentBytes: 1048576
   imagePixelDedup: false
 `)
@@ -33,7 +34,7 @@ clipboard:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Clipboard.Backend != "command" || cfg.Clipboard.DedupWindowMS != 0 || cfg.Clipboard.ImagePixelDedup {
+	if cfg.Clipboard.Backend != "command" || cfg.Clipboard.DedupWindowMS != 0 || cfg.Clipboard.ImageReadDelayMS != 350 || cfg.Clipboard.ImagePixelDedup {
 		t.Fatalf("clipboard 配置解析错误: %+v", cfg.Clipboard)
 	}
 }
@@ -44,6 +45,7 @@ func TestLoadConfigRejectsInvalidClipboardConfig(t *testing.T) {
 		"backend: invalid",
 		"dedupWindowMs: 60001",
 		"readTimeoutMs: 499",
+		"imageReadDelayMs: 2001",
 		"maxContentBytes: 1024",
 	}
 	for _, value := range tests {

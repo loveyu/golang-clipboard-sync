@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"runtime"
@@ -38,6 +39,11 @@ var (
 
 	addClipboardFormatListener    = userDLL.NewProc("AddClipboardFormatListener")
 	removeClipboardFormatListener = userDLL.NewProc("RemoveClipboardFormatListener")
+	openClipboard                 = userDLL.NewProc("OpenClipboard")
+	closeClipboard                = userDLL.NewProc("CloseClipboard")
+	getClipboardData              = userDLL.NewProc("GetClipboardData")
+	setClipboardData              = userDLL.NewProc("SetClipboardData")
+	registerClipboardFormatW      = userDLL.NewProc("RegisterClipboardFormatW")
 	registerClassW                = userDLL.NewProc("RegisterClassW")
 	isClipboardFormatAvailable    = userDLL.NewProc("IsClipboardFormatAvailable")
 	createWindowExW               = userDLL.NewProc("CreateWindowExW")
@@ -50,6 +56,11 @@ var (
 	postQuitMessage               = userDLL.NewProc("PostQuitMessage")
 	getClipboardSequenceNumber    = userDLL.NewProc("GetClipboardSequenceNumber")
 	getModuleHandleW              = kernel32DLL.NewProc("GetModuleHandleW")
+	globalAlloc                   = kernel32DLL.NewProc("GlobalAlloc")
+	globalFree                    = kernel32DLL.NewProc("GlobalFree")
+	globalLock                    = kernel32DLL.NewProc("GlobalLock")
+	globalUnlock                  = kernel32DLL.NewProc("GlobalUnlock")
+	globalSize                    = kernel32DLL.NewProc("GlobalSize")
 	messageBoxW                   = userDLL.NewProc("MessageBoxW")
 )
 
@@ -60,6 +71,7 @@ const (
 	WS_EX_TOOLWINDOW   = 0x00000080
 	WS_EX_NOACTIVATE   = 0x08000000
 	WS_POPUP           = 0x80000000
+	GMEM_MOVEABLE      = 0x0002
 )
 
 // Windows clipboard formats
@@ -126,6 +138,9 @@ type msg struct {
 
 var hwnd windows.Handle
 var wndProc uintptr
+var windowsOriginFormat uintptr
+var windowsOriginFormatOnce sync.Once
+var windowsOriginFormatErr error
 
 //export wndProcCallback
 func wndProcCallback(hWnd windows.Handle, Msg uint32, wParam uintptr, lParam uintptr) uintptr {
@@ -152,6 +167,24 @@ func initClipboard() {
 		showErrorDialog("clipboard-sync - 环境检查失败", msg)
 		log.Fatalf("Exiting: clipboard init failed: %v", err)
 	}
+	if ensureWindowsOriginFormat() == 0 {
+		log.Printf("[CLIPBOARD] origin-marker register-error=%v", windowsOriginFormatErr)
+	}
+}
+
+func ensureWindowsOriginFormat() uintptr {
+	windowsOriginFormatOnce.Do(func() {
+		name, err := windows.UTF16PtrFromString(clipboardOriginMIME)
+		if err != nil {
+			windowsOriginFormatErr = err
+			return
+		}
+		windowsOriginFormat, _, _ = registerClipboardFormatW.Call(uintptr(unsafe.Pointer(name)))
+		if windowsOriginFormat == 0 {
+			windowsOriginFormatErr = windows.GetLastError()
+		}
+	})
+	return windowsOriginFormat
 }
 
 // showErrorDialog shows a Win32 MessageBox error dialog.
@@ -172,15 +205,71 @@ func ReadClipboardContent(mime string) ([]byte, error) {
 }
 
 // SetClipboardContentText 设置剪贴板文本内容
-func SetClipboardContentText(content string) error {
+func SetClipboardContentText(content string, origin ...string) error {
 	clipboard.Write(clipboard.FmtText, []byte(content))
+	writeWindowsClipboardOrigin(firstClipboardOrigin(origin))
 	return nil
 }
 
 // SetClipboardContentImage 设置剪贴板图片内容
-func SetClipboardContentImage(image []byte) error {
+func SetClipboardContentImage(image []byte, origin ...string) error {
 	clipboard.Write(clipboard.FmtImage, image)
+	writeWindowsClipboardOrigin(firstClipboardOrigin(origin))
 	return nil
+}
+
+func writeWindowsClipboardOrigin(origin string) {
+	if origin == "" || ensureWindowsOriginFormat() == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(appConfig.Clipboard.ReadTimeoutMS)*time.Millisecond)
+	defer cancel()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := openWindowsClipboard(ctx); err != nil {
+		log.Printf("[CLIPBOARD] origin-marker write-error=%v", err)
+		return
+	}
+	defer closeClipboard.Call()
+
+	data := []byte(origin)
+	handle, _, callErr := globalAlloc.Call(GMEM_MOVEABLE, uintptr(len(data)))
+	if handle == 0 {
+		log.Printf("[CLIPBOARD] origin-marker alloc-error=%v", callErr)
+		return
+	}
+	owned := false
+	defer func() {
+		if !owned {
+			globalFree.Call(handle)
+		}
+	}()
+	pointer, _, callErr := globalLock.Call(handle)
+	if pointer == 0 {
+		log.Printf("[CLIPBOARD] origin-marker lock-error=%v", callErr)
+		return
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(pointer)), len(data)), data)
+	globalUnlock.Call(handle)
+	result, _, callErr := setClipboardData.Call(windowsOriginFormat, handle)
+	if result == 0 {
+		log.Printf("[CLIPBOARD] origin-marker set-error=%v", callErr)
+		return
+	}
+	owned = true
+}
+
+func openWindowsClipboard(ctx context.Context) error {
+	for {
+		if result, _, _ := openClipboard.Call(0); result != 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func currentClipboardGeneration() uint64 {
@@ -290,6 +379,7 @@ func runMessageLoop(processor *clipboardProcessor, ready chan<- error) {
 	clipboardNotify = func(sequence uint64) {
 		processor.Notify(clipboardPlatformEvent{
 			Generation: sequence,
+			MIMEs:      windowsClipboardMIMEs(),
 			Backend:    "native-windows",
 			Read:       readWindowsClipboardSelection,
 		})
@@ -320,13 +410,42 @@ func runMessageLoop(processor *clipboardProcessor, ready chan<- error) {
 	destroyWindow.Call(uintptr(hwnd))
 }
 
-func readWindowsClipboardSelection(ctx context.Context, _ string, maxBytes int64) (string, []byte, error) {
+func windowsClipboardMIMEs() []string {
+	var mimes []string
+	if ensureWindowsOriginFormat() != 0 {
+		if ok, _, _ := isClipboardFormatAvailable.Call(windowsOriginFormat); ok != 0 {
+			mimes = append(mimes, clipboardOriginMIME)
+		}
+	}
+	if windowsClipboardImageAvailable() {
+		mimes = append(mimes, "image/png")
+	}
+	if ok, _, _ := isClipboardFormatAvailable.Call(CF_UNICODETEXT); ok != 0 {
+		mimes = append(mimes, "text/plain")
+	}
+	return mimes
+}
+
+func windowsClipboardImageAvailable() bool {
+	for _, format := range []uintptr{CF_BITMAP, CF_DIBV5, CF_DIB} {
+		if ok, _, _ := isClipboardFormatAvailable.Call(format); ok != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func readWindowsClipboardSelection(ctx context.Context, requestedMIME string, maxBytes int64) (string, []byte, error) {
 	if debugClipboard {
 		log.Printf("剪贴板内容变化，正在串行处理...")
 	}
 
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
+	}
+	if requestedMIME == clipboardOriginMIME {
+		content, err := readWindowsClipboardOrigin(ctx, maxBytes)
+		return clipboardOriginMIME, content, err
 	}
 	mime := ""
 	var content []byte
@@ -353,4 +472,34 @@ func readWindowsClipboardSelection(ctx context.Context, _ string, maxBytes int64
 		return mime, nil, errClipboardContentTooLarge
 	}
 	return mime, content, nil
+}
+
+func readWindowsClipboardOrigin(ctx context.Context, maxBytes int64) ([]byte, error) {
+	if ensureWindowsOriginFormat() == 0 {
+		return nil, errors.New("origin marker format is unavailable")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := openWindowsClipboard(ctx); err != nil {
+		return nil, err
+	}
+	defer closeClipboard.Call()
+	handle, _, callErr := getClipboardData.Call(windowsOriginFormat)
+	if handle == 0 {
+		return nil, fmt.Errorf("get origin marker: %w", callErr)
+	}
+	size, _, _ := globalSize.Call(handle)
+	if int64(size) > maxBytes {
+		return nil, errClipboardContentTooLarge
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	pointer, _, callErr := globalLock.Call(handle)
+	if pointer == 0 {
+		return nil, fmt.Errorf("lock origin marker: %w", callErr)
+	}
+	defer globalUnlock.Call(handle)
+	content := append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(pointer)), int(size))...)
+	return content, nil
 }
