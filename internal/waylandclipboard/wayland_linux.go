@@ -415,6 +415,15 @@ type source struct {
 	data  []byte
 }
 
+type sourceSend struct {
+	file *os.File
+	data []byte
+}
+
+type syncResult struct {
+	err error
+}
+
 // Monitor owns one persistent data-control connection for selection events,
 // receives and local writes.
 type Monitor struct {
@@ -431,9 +440,14 @@ type Monitor struct {
 
 	sourcesMu sync.RWMutex
 	sources   map[uint32]source
+	sourceIDs []uint32
+	writeMu   sync.Mutex
 	sendsMu   sync.Mutex
 	sends     map[*os.File]struct{}
-	sendsWG   sync.WaitGroup
+	sendQueue chan sourceSend
+	sendDone  chan struct{}
+	syncMu    sync.Mutex
+	syncs     map[uint32]chan syncResult
 	errMu     sync.RWMutex
 	err       error
 }
@@ -454,6 +468,9 @@ func Start(ctx context.Context) (*Monitor, error) {
 		done:       make(chan struct{}),
 		sources:    make(map[uint32]source),
 		sends:      make(map[*os.File]struct{}),
+		sendQueue:  make(chan sourceSend, 64),
+		sendDone:   make(chan struct{}),
+		syncs:      make(map[uint32]chan syncResult),
 	}
 
 	offers := make(map[uint32][]string)
@@ -481,6 +498,7 @@ func Start(ctx context.Context) (*Monitor, error) {
 		_ = connection.request(offerID, offerOpcodeDestroy, nil)
 	}
 
+	go monitor.serveLoop()
 	go monitor.eventLoop(make(map[uint32][]string))
 	go func() {
 		select {
@@ -512,17 +530,19 @@ func (m *Monitor) Close() {
 	m.closeOnce.Do(func() {
 		m.closing.Store(true)
 		m.connection.close()
-		<-m.done
 		m.sendsMu.Lock()
 		for file := range m.sends {
 			_ = file.Close()
 		}
 		m.sendsMu.Unlock()
-		m.sendsWG.Wait()
+		<-m.done
+		close(m.sendQueue)
+		<-m.sendDone
 	})
 }
 
 func (m *Monitor) eventLoop(offers map[uint32][]string) {
+	defer m.failSyncs(net.ErrClosed)
 	defer close(m.done)
 	defer close(m.events)
 	for {
@@ -537,6 +557,7 @@ func (m *Monitor) eventLoop(offers map[uint32][]string) {
 		case objectID == wlDisplayID && opcode == 0:
 			m.setErr(displayError(body))
 			return
+		case opcode == 0 && m.completeSync(objectID):
 		case objectID == m.deviceID && opcode == devEvtSelection && len(body) >= 4:
 			offerID := binary.LittleEndian.Uint32(body[0:4])
 			generation := m.generation.Add(1)
@@ -558,9 +579,11 @@ func (m *Monitor) eventLoop(offers map[uint32][]string) {
 		case opcode == srcEvtSend && m.hasSource(objectID):
 			m.serveSource(objectID, body)
 		case opcode == srcEvtCancelled && m.hasSource(objectID):
-			m.sourcesMu.Lock()
-			delete(m.sources, objectID)
-			m.sourcesMu.Unlock()
+			// Keep a bounded history of cancelled sources. Send requests that
+			// were already queued by a clipboard manager may arrive after the
+			// cancelled event. A tombstone makes us consume and close their
+			// SCM_RIGHTS descriptor in order without retaining clipboard bytes.
+			m.tombstoneSource(objectID)
 		case opcode == offerEvtOffer && hasOffer(offers, objectID):
 			if _, ok := offers[objectID]; ok {
 				if mime, _, decodeErr := decodeString(body, 0); decodeErr == nil {
@@ -568,6 +591,52 @@ func (m *Monitor) eventLoop(offers map[uint32][]string) {
 				}
 			}
 		}
+	}
+}
+
+func (m *Monitor) completeSync(objectID uint32) bool {
+	m.syncMu.Lock()
+	waiter, ok := m.syncs[objectID]
+	if ok {
+		delete(m.syncs, objectID)
+	}
+	m.syncMu.Unlock()
+	if ok {
+		waiter <- syncResult{}
+	}
+	return ok
+}
+
+func (m *Monitor) failSyncs(err error) {
+	m.syncMu.Lock()
+	waiters := m.syncs
+	m.syncs = make(map[uint32]chan syncResult)
+	m.syncMu.Unlock()
+	for _, waiter := range waiters {
+		waiter <- syncResult{err: err}
+	}
+}
+
+func (m *Monitor) confirm(ctx context.Context) error {
+	id := m.connection.newID()
+	waiter := make(chan syncResult, 1)
+	m.syncMu.Lock()
+	m.syncs[id] = waiter
+	m.syncMu.Unlock()
+	if err := m.connection.request(wlDisplayID, dispOpcodeSync, appendUint32(nil, id)); err != nil {
+		m.syncMu.Lock()
+		delete(m.syncs, id)
+		m.syncMu.Unlock()
+		return err
+	}
+	select {
+	case result := <-waiter:
+		return result.err
+	case <-ctx.Done():
+		m.syncMu.Lock()
+		delete(m.syncs, id)
+		m.syncMu.Unlock()
+		return ctx.Err()
 	}
 }
 
@@ -644,6 +713,16 @@ func (m *Monitor) hasSource(sourceID uint32) bool {
 	return ok
 }
 
+func (m *Monitor) tombstoneSource(sourceID uint32) {
+	m.sourcesMu.Lock()
+	value, ok := m.sources[sourceID]
+	if ok {
+		value.data = nil
+		m.sources[sourceID] = value
+	}
+	m.sourcesMu.Unlock()
+}
+
 func (m *Monitor) serveSource(sourceID uint32, body []byte) {
 	mime, _, _ := decodeString(body, 0)
 	fd, ok := m.connection.nextFD()
@@ -671,21 +750,38 @@ func (m *Monitor) serveSource(sourceID uint32, body []byte) {
 		return
 	}
 	m.sends[file] = struct{}{}
-	m.sendsWG.Add(1)
 	m.sendsMu.Unlock()
-	go func() {
-		defer m.sendsWG.Done()
-		_, _ = file.Write(data)
-		_ = file.Close()
+	// Keep source transfers in protocol order. Clipboard managers commonly
+	// request several advertised text types at once; completing those writes
+	// out of order can make them accept an empty/broken-pipe transfer.
+	m.sendQueue <- sourceSend{file: file, data: data}
+}
+
+func (m *Monitor) serveLoop() {
+	defer close(m.sendDone)
+	for send := range m.sendQueue {
+		if !m.closing.Load() {
+			remaining := send.data
+			for len(remaining) > 0 {
+				n, err := send.file.Write(remaining)
+				if err != nil || n == 0 {
+					break
+				}
+				remaining = remaining[n:]
+			}
+		}
+		_ = send.file.Close()
 		m.sendsMu.Lock()
-		delete(m.sends, file)
+		delete(m.sends, send.file)
 		m.sendsMu.Unlock()
-	}()
+	}
 }
 
 // Write replaces the regular selection and serves it through this monitor's
 // existing data-control connection.
 func (m *Monitor) Write(ctx context.Context, mime string, data []byte) error {
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -705,11 +801,15 @@ func (m *Monitor) Write(ctx context.Context, mime string, data []byte) error {
 	sourceID := m.connection.newID()
 	m.sourcesMu.Lock()
 	m.sources[sourceID] = source{mimes: offered, data: append([]byte(nil), data...)}
+	m.sourceIDs = append(m.sourceIDs, sourceID)
+	if len(m.sourceIDs) > 64 {
+		staleID := m.sourceIDs[0]
+		m.sourceIDs = m.sourceIDs[1:]
+		delete(m.sources, staleID)
+	}
 	m.sourcesMu.Unlock()
 	fail := func(err error) error {
-		m.sourcesMu.Lock()
-		delete(m.sources, sourceID)
-		m.sourcesMu.Unlock()
+		m.tombstoneSource(sourceID)
 		return err
 	}
 	if err := m.connection.request(m.managerID, mgrOpcodeCreateDataSource, appendUint32(nil, sourceID)); err != nil {
@@ -721,6 +821,9 @@ func (m *Monitor) Write(ctx context.Context, mime string, data []byte) error {
 		}
 	}
 	if err := m.connection.request(m.deviceID, devOpcodeSetSelection, appendUint32(nil, sourceID)); err != nil {
+		return fail(err)
+	}
+	if err := m.confirm(ctx); err != nil {
 		return fail(err)
 	}
 	return nil

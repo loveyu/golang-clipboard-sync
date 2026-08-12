@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"syscall"
 	"testing"
 	"time"
@@ -95,9 +96,10 @@ func TestMonitorWriteServesTextOnSameConnection(t *testing.T) {
 	defer monitor.Close()
 	defer server.Close()
 
-	if err := monitor.Write(context.Background(), "text/plain", []byte("native-write")); err != nil {
-		t.Fatal(err)
-	}
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- monitor.Write(context.Background(), "text/plain", []byte("native-write"))
+	}()
 	objectID, opcode, body := readProtocolRequest(t, server)
 	if objectID != monitor.managerID || opcode != mgrOpcodeCreateDataSource || len(body) < 4 {
 		t.Fatalf("create source request = object %d opcode %d body %v", objectID, opcode, body)
@@ -117,6 +119,14 @@ func TestMonitorWriteServesTextOnSameConnection(t *testing.T) {
 	objectID, opcode, body = readProtocolRequest(t, server)
 	if objectID != monitor.deviceID || opcode != devOpcodeSetSelection || binary.LittleEndian.Uint32(body[0:4]) != sourceID {
 		t.Fatalf("set selection request = object %d opcode %d body %v", objectID, opcode, body)
+	}
+	objectID, opcode, body = readProtocolRequest(t, server)
+	if objectID != wlDisplayID || opcode != dispOpcodeSync || len(body) < 4 {
+		t.Fatalf("sync request = object %d opcode %d body %v", objectID, opcode, body)
+	}
+	sendProtocolEvent(t, server, binary.LittleEndian.Uint32(body[0:4]), 0, nil)
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
 	}
 
 	reader, writer, err := os.Pipe()
@@ -138,6 +148,54 @@ func TestMonitorWriteServesTextOnSameConnection(t *testing.T) {
 	}
 }
 
+func TestCancelledSourceSendConsumesItsDescriptor(t *testing.T) {
+	monitor, server := newProtocolTestMonitor(t)
+	defer monitor.Close()
+	defer server.Close()
+
+	const cancelledID uint32 = 70
+	const currentID uint32 = 71
+	textMIME := map[string]struct{}{"text/plain": {}}
+	monitor.sourcesMu.Lock()
+	monitor.sources[cancelledID] = source{mimes: textMIME, data: []byte("stale")}
+	monitor.sources[currentID] = source{mimes: textMIME, data: []byte("current")}
+	monitor.sourcesMu.Unlock()
+
+	staleReader, staleWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentReader, currentWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := encodeString("text/plain")
+	message := append(protocolMessage(cancelledID, srcEvtCancelled, nil), protocolMessage(cancelledID, srcEvtSend, body)...)
+	message = append(message, protocolMessage(currentID, srcEvtSend, body)...)
+	if _, _, err := server.WriteMsgUnix(message, syscall.UnixRights(int(staleWriter.Fd()), int(currentWriter.Fd())), nil); err != nil {
+		t.Fatal(err)
+	}
+	_ = staleWriter.Close()
+	_ = currentWriter.Close()
+
+	staleContent, err := io.ReadAll(staleReader)
+	_ = staleReader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staleContent) != 0 {
+		t.Fatalf("cancelled source content = %q，期望为空", staleContent)
+	}
+	currentContent, err := io.ReadAll(currentReader)
+	_ = currentReader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(currentContent) != "current" {
+		t.Fatalf("current source content = %q，期望 current", currentContent)
+	}
+}
+
 func TestNativeWaylandConnectionIntegration(t *testing.T) {
 	if os.Getenv("CLIPBOARD_WAYLAND_NATIVE_INTEGRATION") != "1" {
 		t.Skip("设置 CLIPBOARD_WAYLAND_NATIVE_INTEGRATION=1 后运行原生 Wayland 连接测试")
@@ -156,6 +214,63 @@ func TestNativeWaylandConnectionIntegration(t *testing.T) {
 	monitor.Close()
 	if err := monitor.Err(); err != nil {
 		t.Fatalf("正常关闭返回错误: %v", err)
+	}
+}
+
+func TestNativeWaylandWriteIntegration(t *testing.T) {
+	if os.Getenv("CLIPBOARD_WAYLAND_NATIVE_INTEGRATION") != "1" {
+		t.Skip("设置 CLIPBOARD_WAYLAND_NATIVE_INTEGRATION=1 后运行原生 Wayland 写入测试")
+	}
+	if _, err := exec.LookPath("wl-paste"); err != nil {
+		t.Skip("wl-paste 不可用")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	monitor, err := Start(ctx)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	defer func() {
+		cancel()
+		monitor.Close()
+	}()
+
+	const want = "clipboard-sync-native-write"
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer writeCancel()
+	writeErrors := make(chan error, 2)
+	for range 2 {
+		go func() {
+			writeErrors <- monitor.Write(writeCtx, "text/plain;charset=utf-8", []byte(want))
+		}()
+	}
+	for range 2 {
+		if err := <-writeErrors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var own Selection
+	select {
+	case own = <-monitor.Events():
+	case <-time.After(5 * time.Second):
+		t.Fatal("未收到本连接写入产生的 selection")
+	}
+	ownContent, err := own.Read(writeCtx, "text/plain;charset=utf-8", 1024)
+	own.Release()
+	if err != nil {
+		t.Fatalf("读取本连接 selection: %v", err)
+	}
+	if string(ownContent) != want {
+		t.Fatalf("本连接 selection = %q，期望 %q", ownContent, want)
+	}
+	pasteCtx, pasteCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pasteCancel()
+	out, err := exec.CommandContext(pasteCtx, "wl-paste", "--no-newline").Output()
+	if err != nil {
+		t.Fatalf("wl-paste: %v", err)
+	}
+	if string(out) != want {
+		t.Fatalf("wl-paste = %q，期望 %q", out, want)
 	}
 }
 
@@ -187,7 +302,11 @@ func newProtocolTestMonitor(t *testing.T) (*Monitor, *net.UnixConn) {
 		done:       make(chan struct{}),
 		sources:    make(map[uint32]source),
 		sends:      make(map[*os.File]struct{}),
+		sendQueue:  make(chan sourceSend, 64),
+		sendDone:   make(chan struct{}),
+		syncs:      make(map[uint32]chan syncResult),
 	}
+	go monitor.serveLoop()
 	go monitor.eventLoop(make(map[uint32][]string))
 	return monitor, server
 }
