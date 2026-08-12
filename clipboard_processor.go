@@ -116,11 +116,12 @@ type clipboardFingerprintEntry struct {
 }
 
 type clipboardEchoEntry struct {
-	token      string
-	kind       string
-	raw        [sha256.Size]byte
-	generation uint64
-	expiresAt  time.Time
+	token           string
+	kind            string
+	raw             [sha256.Size]byte
+	startGeneration uint64
+	generation      uint64
+	expiresAt       time.Time
 }
 
 type clipboardPixelTask struct {
@@ -539,6 +540,10 @@ func firstClipboardOrigin(origins []string) string {
 }
 
 func (p *clipboardProcessor) registerEcho(token, mime string, content []byte) {
+	p.registerEchoAt(token, mime, content, 0)
+}
+
+func (p *clipboardProcessor) registerEchoAt(token, mime string, content []byte, startGeneration uint64) {
 	kind := clipboardContentKind(mime)
 	if kind == "" {
 		return
@@ -549,10 +554,11 @@ func (p *clipboardProcessor) registerEcho(token, mime string, content []byte) {
 	}
 	p.echoMu.Lock()
 	p.echo = &clipboardEchoEntry{
-		token:     token,
-		kind:      kind,
-		raw:       clipboardRawFingerprint(kind, content),
-		expiresAt: p.now().Add(ttl),
+		token:           token,
+		kind:            kind,
+		raw:             clipboardRawFingerprint(kind, content),
+		startGeneration: startGeneration,
+		expiresAt:       p.now().Add(ttl),
 	}
 	p.echoMu.Unlock()
 }
@@ -580,7 +586,7 @@ func (p *clipboardProcessor) consumeEcho(kind string, raw [sha256.Size]byte, gen
 		p.echo = nil
 		return false
 	}
-	if p.echo.generation != 0 && generation != 0 && generation < p.echo.generation {
+	if p.echo.startGeneration != 0 && generation != 0 && generation <= p.echo.startGeneration {
 		return false
 	}
 	if p.echo.kind == kind && hmac.Equal(p.echo.raw[:], raw[:]) {
@@ -652,11 +658,12 @@ func setActiveClipboardProcessor(processor *clipboardProcessor) {
 
 func registerLocalClipboardWrite(mime string, content []byte) string {
 	token := generateUUID()
+	startGeneration := currentClipboardGeneration()
 	activeClipboardProcessor.RLock()
 	processor := activeClipboardProcessor.processor
 	activeClipboardProcessor.RUnlock()
 	if processor != nil {
-		processor.registerEcho(token, mime, content)
+		processor.registerEchoAt(token, mime, content, startGeneration)
 	}
 	return token
 }

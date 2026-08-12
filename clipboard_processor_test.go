@@ -158,6 +158,24 @@ func TestClipboardProcessorSuppressesContentBoundEcho(t *testing.T) {
 	}
 }
 
+func TestClipboardProcessorEchoCoversMultiGenerationWrite(t *testing.T) {
+	processor := newClipboardProcessor(testClipboardConfig(), make(chan ClipboardChange, 1))
+	token := "multi-format-write"
+	content := []byte("remote")
+	raw := clipboardRawFingerprint("text", content)
+	processor.registerEchoAt(token, "text/plain", content, 10)
+	processor.completeEcho(token, 12, true)
+	if processor.consumeEcho("text", raw, 10) {
+		t.Fatal("写入前的 generation 不应被识别为本地回声")
+	}
+	if !processor.consumeEcho("text", raw, 11) {
+		t.Fatal("多格式写入期间的 generation 应被识别为本地回声")
+	}
+	if !processor.consumeEcho("text", raw, 12) {
+		t.Fatal("写入完成的 generation 应被识别为本地回声")
+	}
+}
+
 func TestClipboardProcessorSuppressesOriginBeforeImageRead(t *testing.T) {
 	cfg := testClipboardConfig()
 	cfg.ImageReadDelayMS = 0
