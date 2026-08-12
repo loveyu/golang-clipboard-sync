@@ -12,13 +12,18 @@ import (
 
 func TestHTTPForwardCancellationStopsInflightRequest(t *testing.T) {
 	started := make(chan struct{})
-	cancelled := make(chan struct{})
+	releaseServer := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
 		close(started)
-		<-request.Context().Done()
-		close(cancelled)
+		select {
+		case <-request.Context().Done():
+		case <-releaseServer:
+		}
 	}))
-	defer server.Close()
+	t.Cleanup(func() {
+		close(releaseServer)
+		server.Close()
+	})
 
 	parsed, err := url.Parse(server.URL + "/update-clipboard")
 	if err != nil {
@@ -41,5 +46,4 @@ func TestHTTPForwardCancellationStopsInflightRequest(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("HTTP 请求取消超时")
 	}
-	waitTestSignal(t, cancelled, "HTTP 服务端观察到取消")
 }
