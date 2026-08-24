@@ -44,16 +44,22 @@ func removeTrailingNewline(data []byte) []byte {
 // DetermineContentType determines the type of content (text, image, file, etc.).
 func DetermineContentType(types []string) (string, string) {
 	for _, t := range types {
+		normalized := strings.ToLower(strings.TrimSpace(t))
 		// Check for image types
-		if strings.HasPrefix(t, "image/") {
+		if strings.HasPrefix(normalized, "image/") {
 			return "image", t
 		}
+		// Check for X11 text target atoms. Normalize them to the MIME used by
+		// the other platform backends before a message is forwarded.
+		if normalized == "utf8_string" || normalized == "string" || normalized == "text" {
+			return "text", "text/plain;charset=utf-8"
+		}
 		// Check for text types
-		if strings.HasPrefix(t, "text/") {
+		if strings.HasPrefix(normalized, "text/") {
 			return "text", t
 		}
 		// Check for file types
-		if t == "text/uri-list" || t == "application/x-kde4-urilist" {
+		if normalized == "text/uri-list" || normalized == "application/x-kde4-urilist" {
 			return "file", t
 		}
 	}
@@ -83,6 +89,13 @@ func isUTF8Charset(cs string) bool {
 // convertToUTF8 converts data from the charset encoded in the MIME type to UTF-8.
 // Returns the original data unchanged if already UTF-8 or charset is unknown.
 func convertToUTF8(data []byte, mime string) []byte {
+	if strings.EqualFold(strings.TrimSpace(mime), "STRING") {
+		out, _, err := transform.Bytes(charmap.ISO8859_1.NewDecoder(), data)
+		if err == nil {
+			return out
+		}
+		return data
+	}
 	charset := extractCharset(mime)
 	switch charset {
 	case "", "utf-8", "utf8", "us-ascii", "ascii":

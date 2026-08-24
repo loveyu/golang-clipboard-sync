@@ -2,10 +2,10 @@
 
 ## 文档信息
 
-- **状态**：v0.11 实现完成，待发布与部署验收
+- **状态**：v0.11 已交付；v0.12 原生 X11 扩展已实现，待发布与部署验收
 - **编写日期**：2026-08-12
-- **当前基线**：v0.10（提交 `56b85ea7`）
-- **目标版本**：v0.11（统一处理层与原生 Wayland 后端一次性交付）
+- **当前基线**：v0.11.2（提交 `50745372`）
+- **目标版本**：v0.12（补齐原生 X11/XFixes Selection 与 INCR 传输）
 - **适用平台**：Linux Wayland、Linux X11、Windows、macOS
 
 ## 1. 背景
@@ -85,6 +85,7 @@ KDE Wayland 环境曾出现截图写入剪贴板后桌面冻结、鼠标仍可�
 | `wl-paste --watch` 直接把 stdin 交给辅助进程 | 比二次读取少一次访问 | MIME 信息不足；每次 selection 仍创建辅助进程；生命周期复杂 | 仅作为命令后端候选优化，不作为最终架构 |
 | 直接使用 `golang.design/x/clipboard v0.8.0` 多格式 `Watch` | 纯 Go、原生 Wayland、事件驱动 | 公共 API 会按格式建立独立 watcher；同时监听文本和图片时存在多个内部读取路径 | 不直接使用多格式 `Watch` |
 | 单连接原生 data-control 适配器 | 一次 offer、一次 MIME 选择、一次读取；无外部监听进程 | 需要新增协议适配和较完整的集成测试 | 最终方案 |
+| XFixes + 原生 X11 Selection/INCR | 事件驱动、无外部命令、保留标准 X11 客户端兼容性 | 需要自行处理 TARGETS、来源标记和双向 INCR | v0.12 X11 最终方案 |
 
 `golang.design/x/clipboard v0.8.0` 已包含纯 Go Wayland data-control 实现，可作为实现和测试参考。优先向上游增加“单 selection、多 MIME 选择、单连接”的接口；如果上游发布周期不能满足项目计划，则在 `internal/waylandclipboard` 中实现最小适配器，并保留原项目 MIT 许可证声明和 NOTICE 归属。
 
@@ -94,7 +95,7 @@ KDE Wayland 环境曾出现截图写入剪贴板后桌面冻结、鼠标仍可�
 平台事件源
   ├─ Wayland: 单个 data-control connection / selection offer
   ├─ Windows: WM_CLIPBOARDUPDATE + sequence number
-  ├─ X11: xsel/xclip command fallback
+  ├─ X11: XFixes owner event + native Selection/INCR（xclip 可选回退）
   └─ macOS: NSPasteboard changeCount
           │
           ▼
@@ -182,7 +183,8 @@ KDE Wayland 环境曾出现截图写入剪贴板后桌面冻结、鼠标仍可�
 
 ### FR-07：命令后端回退
 
-- `auto` 模式下原生协议不可用或初始化失败时回退命令后端。
+- Wayland `auto` 模式下原生 data-control 不可用或初始化失败时回退命令后端。
+- X11 的原生与命令后端都依赖 XFixes 事件监听；XFixes 不可用时明确失败，避免退回轮询或伪 watch。
 - 运行中的原生连接异常默认先重连，不因一次瞬时错误永久降级。
 - 连续失败达到明确阈值后可以降级，但必须记录原因和后端变化。
 - 命令后端继续使用 v0.10 的幂等 Stop、等待子进程退出和指数退避逻辑。
@@ -199,8 +201,11 @@ KDE Wayland 环境曾出现截图写入剪贴板后桌面冻结、鼠标仍可�
 ### FR-09：macOS 与 X11
 
 - macOS 保留 `NSPasteboard changeCount` 作为 generation，接入统一处理器和内容去重。
-- X11 保留命令后端作为兼容路径，接入统一处理器。
-- 本需求不强制在 v0.11 重写 macOS JXA 和 X11 协议实现。
+- X11 使用 XFixes 监听 CLIPBOARD owner 变化，事件循环只投递 generation 和 TARGETS，不读取正文。
+- 唯一处理器通过原生 Selection 请求有界读取正文，同时支持接收和发送 INCR 大内容。
+- 原生写入同时提供 UTF8_STRING/STRING/TEXT、标准 MIME 和来源标记 target，用于兼容客户端及精确回声抑制。
+- `command` 回退仅将 X11 正文读写交给 xclip，变更事件仍由 XFixes 提供；不再使用不存在的 xsel `--watch`。
+- macOS JXA 协议实现不在 v0.12 的改动范围内。
 
 ### FR-10：资源边界
 

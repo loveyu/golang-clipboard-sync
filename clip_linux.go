@@ -31,27 +31,31 @@ import (
 	"time"
 
 	"clipboard-sync/internal/waylandclipboard"
+	"clipboard-sync/internal/x11clipboard"
 )
 
-var (
-	isWayland = os.Getenv("XDG_SESSION_TYPE") == "wayland" || os.Getenv("WAYLAND_DISPLAY") != ""
-	isX11     = os.Getenv("XDG_SESSION_TYPE") == "x11" || os.Getenv("DISPLAY") != ""
-)
+var isWayland, isX11 = detectLinuxSession()
 
 const defaultMaxRuntime = 3600
 
 type linuxClipboardBackend string
 
 const (
-	linuxBackendNative  linuxClipboardBackend = "native"
-	linuxBackendCommand linuxClipboardBackend = "command"
+	linuxBackendNativeWayland linuxClipboardBackend = "native-wayland"
+	linuxBackendNativeX11     linuxClipboardBackend = "native-x11"
+	linuxBackendCommand       linuxClipboardBackend = "command"
 )
 
 var selectedLinuxBackend = linuxBackendCommand
 
-var nativeMonitorState struct {
+var waylandMonitorState struct {
 	sync.RWMutex
 	monitor *waylandclipboard.Monitor
+}
+
+var x11MonitorState struct {
+	sync.RWMutex
+	monitor *x11clipboard.Monitor
 }
 
 var linuxClipboardGeneration atomic.Uint64
@@ -84,7 +88,7 @@ func initClipboard() {
 	if isWayland && requested != "command" {
 		info, err := waylandclipboard.Probe()
 		if err == nil {
-			selectedLinuxBackend = linuxBackendNative
+			selectedLinuxBackend = linuxBackendNativeWayland
 			log.Printf("[CLIPBOARD] backend=native reason=data-control-available interface=%s version=%d", info.Interface, info.Version)
 			return
 		}
@@ -96,11 +100,31 @@ func initClipboard() {
 		}
 		log.Printf("[CLIPBOARD] backend=command reason=native-unavailable error=%v", err)
 	}
+	if isX11 {
+		info, err := x11clipboard.Probe()
+		if err == nil && requested != "command" {
+			selectedLinuxBackend = linuxBackendNativeX11
+			log.Printf("[CLIPBOARD] backend=native-x11 reason=xfixes-available version=%d.%d", info.XFixesMajor, info.XFixesMinor)
+			return
+		}
+		if err != nil {
+			msg := fmt.Sprintf("X11 XFixes 事件监听初始化失败: %v", err)
+			log.Printf("[ERROR] %s", msg)
+			showErrorDialog("clipboard-sync - 环境检查失败", msg)
+			log.Fatalf("Exiting: %s", msg)
+		}
+	}
+	if !isWayland && !isX11 {
+		msg := "无法识别 Linux 图形会话，不能启动剪贴板监听"
+		log.Printf("[ERROR] %s", msg)
+		showErrorDialog("clipboard-sync - 环境检查失败", msg)
+		log.Fatalf("Exiting: %s", msg)
+	}
 
 	selectedLinuxBackend = linuxBackendCommand
 	missing := requiredCommandBackendTools()
 	if len(missing) > 0 {
-		msg := fmt.Sprintf("缺少必需程序: %s\n\nWayland 命令后端需要: wl-paste, wl-copy\nX11 需要: xclip, xsel", strings.Join(missing, ", "))
+		msg := fmt.Sprintf("缺少必需程序: %s\n\nWayland 命令后端需要: wl-paste, wl-copy\nX11 命令后端需要: xclip", strings.Join(missing, ", "))
 		log.Printf("[ERROR] %s", msg)
 		showErrorDialog("clipboard-sync - 环境检查失败", msg)
 		log.Fatalf("Exiting: missing required programs: %s", strings.Join(missing, ", "))
@@ -117,7 +141,7 @@ func requiredCommandBackendTools() []string {
 	if isWayland {
 		required = []string{"wl-paste", "wl-copy"}
 	} else {
-		required = []string{"xclip", "xsel"}
+		required = []string{"xclip"}
 	}
 	var missing []string
 	for _, command := range required {
@@ -126,6 +150,19 @@ func requiredCommandBackendTools() []string {
 		}
 	}
 	return missing
+}
+
+func detectLinuxSession() (wayland, x11 bool) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("XDG_SESSION_TYPE"))) {
+	case "wayland":
+		return true, false
+	case "x11":
+		return false, true
+	}
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		return true, false
+	}
+	return false, os.Getenv("DISPLAY") != ""
 }
 
 func linuxSessionName() string {
@@ -139,19 +176,10 @@ func linuxSessionName() string {
 }
 
 func showErrorDialog(title, message string) {
-	attempts := []struct {
-		name string
-		args []string
-	}{
-		{name: "zenity", args: []string{"--error", "--title", title, "--text", message, "--no-markup"}},
-		{name: "kdialog", args: []string{"--error", message, "--title", title}},
-		{name: "xmessage", args: []string{"-center", "-title", title, message}},
-	}
-	for _, attempt := range attempts {
-		if commandExists(attempt.name) {
-			_ = exec.Command(attempt.name, attempt.args...).Run()
-			return
-		}
+	if commandExists("notify-send") {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "notify-send", "--urgency=critical", "--app-name=clipboard-sync", title, message).Run()
 	}
 }
 
@@ -177,14 +205,17 @@ func DetectClipboardMime() string {
 func ReadClipboardContent(mime string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(appConfig.Clipboard.ReadTimeoutMS)*time.Millisecond)
 	defer cancel()
-	if selectedLinuxBackend == linuxBackendNative {
-		nativeMonitorState.RLock()
-		monitor := nativeMonitorState.monitor
-		nativeMonitorState.RUnlock()
+	if selectedLinuxBackend == linuxBackendNativeWayland {
+		waylandMonitorState.RLock()
+		monitor := waylandMonitorState.monitor
+		waylandMonitorState.RUnlock()
 		if monitor == nil {
 			return nil, waylandclipboard.ErrUnavailable
 		}
 		return nil, errors.New("native direct read requires a selection event")
+	}
+	if selectedLinuxBackend == linuxBackendNativeX11 {
+		return nil, errors.New("native X11 direct read requires a selection event")
 	}
 	if isWayland {
 		return runCommandOutputBounded(ctx, appConfig.Clipboard.MaxContentBytes, "wl-paste", "-n", "-t", mime)
@@ -193,8 +224,11 @@ func ReadClipboardContent(mime string) ([]byte, error) {
 }
 
 func SetClipboardContentText(content string, origin ...string) error {
-	if selectedLinuxBackend == linuxBackendNative {
+	if selectedLinuxBackend == linuxBackendNativeWayland {
 		return writeNativeClipboard("text/plain;charset=utf-8", []byte(content), firstClipboardOrigin(origin))
+	}
+	if selectedLinuxBackend == linuxBackendNativeX11 {
+		return writeNativeX11Clipboard("text/plain;charset=utf-8", []byte(content), firstClipboardOrigin(origin))
 	}
 	if isWayland {
 		return runClipboardWriteCommand("wl-copy", []string{"--type", "text/plain;charset=utf-8"}, []byte(content))
@@ -203,8 +237,11 @@ func SetClipboardContentText(content string, origin ...string) error {
 }
 
 func SetClipboardContentImage(image []byte, origin ...string) error {
-	if selectedLinuxBackend == linuxBackendNative {
+	if selectedLinuxBackend == linuxBackendNativeWayland {
 		return writeNativeClipboard("image/png", image, firstClipboardOrigin(origin))
+	}
+	if selectedLinuxBackend == linuxBackendNativeX11 {
+		return writeNativeX11Clipboard("image/png", image, firstClipboardOrigin(origin))
 	}
 	if isWayland {
 		return runClipboardWriteCommand("wl-copy", []string{"--type", "image/png"}, image)
@@ -213,11 +250,26 @@ func SetClipboardContentImage(image []byte, origin ...string) error {
 }
 
 func writeNativeClipboard(mime string, content []byte, origin string) error {
-	nativeMonitorState.RLock()
-	monitor := nativeMonitorState.monitor
-	nativeMonitorState.RUnlock()
+	waylandMonitorState.RLock()
+	monitor := waylandMonitorState.monitor
+	waylandMonitorState.RUnlock()
 	if monitor == nil {
 		return waylandclipboard.ErrUnavailable
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(appConfig.Clipboard.ReadTimeoutMS)*time.Millisecond)
+	defer cancel()
+	if origin != "" {
+		return monitor.WriteWithOrigin(ctx, mime, content, clipboardOriginMIME, []byte(origin))
+	}
+	return monitor.Write(ctx, mime, content)
+}
+
+func writeNativeX11Clipboard(mime string, content []byte, origin string) error {
+	x11MonitorState.RLock()
+	monitor := x11MonitorState.monitor
+	x11MonitorState.RUnlock()
+	if monitor == nil {
+		return x11clipboard.ErrUnavailable
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(appConfig.Clipboard.ReadTimeoutMS)*time.Millisecond)
 	defer cancel()
@@ -254,7 +306,8 @@ func ListenClipboardChanges() <-chan ClipboardChange {
 		setActiveClipboardProcessor(nil)
 		close(changes)
 	})
-	if selectedLinuxBackend == linuxBackendNative {
+	switch selectedLinuxBackend {
+	case linuxBackendNativeWayland:
 		monitor, err := waylandclipboard.Start(context.Background())
 		if err != nil {
 			if appConfig.Clipboard.Backend == "auto" && len(requiredCommandBackendTools()) == 0 {
@@ -265,17 +318,34 @@ func ListenClipboardChanges() <-chan ClipboardChange {
 			}
 			log.Fatalf("[CLIPBOARD] native backend start failed: %v", err)
 		}
-		nativeMonitorState.Lock()
-		nativeMonitorState.monitor = monitor
-		nativeMonitorState.Unlock()
-		startClipboardWorker(func() { runNativeClipboardSource(processor, stopCh, monitor) })
-	} else {
-		startClipboardWorker(func() { runCommandClipboardSource(processor, stopCh, getMaxRuntime(), startClipboardMonitorPipe) })
+		waylandMonitorState.Lock()
+		waylandMonitorState.monitor = monitor
+		waylandMonitorState.Unlock()
+		startClipboardWorker(func() { runNativeWaylandClipboardSource(processor, stopCh, monitor) })
+	case linuxBackendNativeX11:
+		monitor, err := x11clipboard.Start(context.Background())
+		if err != nil {
+			log.Fatalf("[CLIPBOARD] native X11 backend start failed: %v", err)
+		}
+		x11MonitorState.Lock()
+		x11MonitorState.monitor = monitor
+		x11MonitorState.Unlock()
+		startClipboardWorker(func() { runX11ClipboardSource(processor, stopCh, monitor, true) })
+	case linuxBackendCommand:
+		if isWayland {
+			startClipboardWorker(func() { runCommandClipboardSource(processor, stopCh, getMaxRuntime(), startClipboardMonitorPipe) })
+			break
+		}
+		monitor, err := x11clipboard.Start(context.Background())
+		if err != nil {
+			log.Fatalf("[CLIPBOARD] X11 event monitor start failed: %v", err)
+		}
+		startClipboardWorker(func() { runX11ClipboardSource(processor, stopCh, monitor, false) })
 	}
 	return changes
 }
 
-func runNativeClipboardSource(processor *clipboardProcessor, stop <-chan struct{}, initial *waylandclipboard.Monitor) {
+func runNativeWaylandClipboardSource(processor *clipboardProcessor, stop <-chan struct{}, initial *waylandclipboard.Monitor) {
 	backoff := time.Second
 	monitor := initial
 	for {
@@ -290,9 +360,9 @@ func runNativeClipboardSource(processor *clipboardProcessor, stop <-chan struct{
 				backoff = nextClipboardBackoff(backoff)
 				continue
 			}
-			nativeMonitorState.Lock()
-			nativeMonitorState.monitor = monitor
-			nativeMonitorState.Unlock()
+			waylandMonitorState.Lock()
+			waylandMonitorState.monitor = monitor
+			waylandMonitorState.Unlock()
 		}
 		info := monitor.Info()
 		log.Printf("[CLIPBOARD] backend=native started interface=%s version=%d", info.Interface, info.Version)
@@ -327,11 +397,11 @@ func runNativeClipboardSource(processor *clipboardProcessor, stop <-chan struct{
 		}
 		monitor.Close()
 		disconnectErr := monitor.Err()
-		nativeMonitorState.Lock()
-		if nativeMonitorState.monitor == monitor {
-			nativeMonitorState.monitor = nil
+		waylandMonitorState.Lock()
+		if waylandMonitorState.monitor == monitor {
+			waylandMonitorState.monitor = nil
 		}
-		nativeMonitorState.Unlock()
+		waylandMonitorState.Unlock()
 		monitor = nil
 		select {
 		case <-stop:
@@ -340,6 +410,96 @@ func runNativeClipboardSource(processor *clipboardProcessor, stop <-chan struct{
 		default:
 		}
 		log.Printf("[CLIPBOARD] backend=native disconnected error=%v reconnect=%v", disconnectErr, backoff)
+		if !waitClipboardBackoff(stop, backoff) {
+			return
+		}
+		backoff = nextClipboardBackoff(backoff)
+	}
+}
+
+func runX11ClipboardSource(processor *clipboardProcessor, stop <-chan struct{}, initial *x11clipboard.Monitor, native bool) {
+	backoff := time.Second
+	monitor := initial
+	backend := "native-x11"
+	if !native {
+		backend = "command-x11"
+	}
+	for {
+		if monitor == nil {
+			var err error
+			monitor, err = x11clipboard.Start(context.Background())
+			if err != nil {
+				log.Printf("[CLIPBOARD] backend=%s start-error=%v reconnect=%v", backend, err, backoff)
+				if !waitClipboardBackoff(stop, backoff) {
+					return
+				}
+				backoff = nextClipboardBackoff(backoff)
+				continue
+			}
+			if native {
+				x11MonitorState.Lock()
+				x11MonitorState.monitor = monitor
+				x11MonitorState.Unlock()
+			}
+		}
+		info := monitor.Info()
+		log.Printf("[CLIPBOARD] backend=%s started xfixes=%d.%d", backend, info.XFixesMajor, info.XFixesMinor)
+
+		running := true
+		for running {
+			select {
+			case selection, ok := <-monitor.Events():
+				if !ok {
+					running = false
+					break
+				}
+				generation := linuxClipboardGeneration.Add(1)
+				backoff = time.Second
+				selected := selection
+				processor.Notify(clipboardPlatformEvent{
+					Generation: generation,
+					MIMEs:      append([]string(nil), selected.MIMEs...),
+					Backend:    backend,
+					Read: func(ctx context.Context, mime string, maxBytes int64) (string, []byte, error) {
+						var content []byte
+						var err error
+						if native {
+							content, err = selected.Read(ctx, mime, maxBytes)
+						} else {
+							content, err = readClipboardContentX11(ctx, mime, maxBytes)
+						}
+						if errors.Is(err, x11clipboard.ErrTooLarge) {
+							err = errClipboardContentTooLarge
+						}
+						if clipboardContentKind(mime) == "text" && mime != clipboardOriginMIME {
+							content = convertToUTF8(content, mime)
+							mime = "text/plain;charset=utf-8"
+						}
+						return mime, content, err
+					},
+					Release: selected.Release,
+				})
+			case <-stop:
+				running = false
+			}
+		}
+		monitor.Close()
+		disconnectErr := monitor.Err()
+		if native {
+			x11MonitorState.Lock()
+			if x11MonitorState.monitor == monitor {
+				x11MonitorState.monitor = nil
+			}
+			x11MonitorState.Unlock()
+		}
+		monitor = nil
+		select {
+		case <-stop:
+			log.Printf("[CLIPBOARD] backend=%s stopped", backend)
+			return
+		default:
+		}
+		log.Printf("[CLIPBOARD] backend=%s disconnected error=%v reconnect=%v", backend, disconnectErr, backoff)
 		if !waitClipboardBackoff(stop, backoff) {
 			return
 		}
@@ -512,10 +672,7 @@ func runCommandOutputBounded(ctx context.Context, maxBytes int64, name string, a
 }
 
 func startClipboardMonitorPipe(notify func()) *clipboardMonitor {
-	if isWayland {
-		return startCommandWatcher("wl-paste", []string{"-w", "date", "+%s"}, notify, true)
-	}
-	return startCommandWatcher("xsel", []string{"--clipboard", "--watch"}, notify, true)
+	return startCommandWatcher("wl-paste", []string{"-w", "date", "+%s"}, notify, true)
 }
 
 func startCommandWatcher(name string, args []string, notify func(), ignoreFirst bool) *clipboardMonitor {

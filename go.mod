@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.4.3
+	github.com/jezek/xgb v1.3.1
 	golang.design/x/clipboard v0.8.0
 	golang.org/x/image v0.28.0
 	golang.org/x/sys v0.33.0

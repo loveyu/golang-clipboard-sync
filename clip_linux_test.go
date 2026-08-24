@@ -11,6 +11,34 @@ import (
 	"time"
 )
 
+func TestDetectLinuxSession(t *testing.T) {
+	tests := []struct {
+		name           string
+		sessionType    string
+		waylandDisplay string
+		display        string
+		wantWayland    bool
+		wantX11        bool
+	}{
+		{name: "explicit Wayland wins", sessionType: "wayland", waylandDisplay: "wayland-0", display: ":0", wantWayland: true},
+		{name: "explicit X11 wins", sessionType: "x11", waylandDisplay: "wayland-0", display: ":0", wantX11: true},
+		{name: "Wayland display fallback", waylandDisplay: "wayland-0", display: ":0", wantWayland: true},
+		{name: "X11 display fallback", display: ":10.0", wantX11: true},
+		{name: "headless"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_SESSION_TYPE", test.sessionType)
+			t.Setenv("WAYLAND_DISPLAY", test.waylandDisplay)
+			t.Setenv("DISPLAY", test.display)
+			wayland, x11 := detectLinuxSession()
+			if wayland != test.wantWayland || x11 != test.wantX11 {
+				t.Fatalf("detectLinuxSession() = (%t, %t), want (%t, %t)", wayland, x11, test.wantWayland, test.wantX11)
+			}
+		})
+	}
+}
+
 func TestListenClipboardChangesStopsMonitorBeforeTimedRestart(t *testing.T) {
 	stop := make(chan struct{})
 	var starts atomic.Int32

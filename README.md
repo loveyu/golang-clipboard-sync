@@ -9,7 +9,7 @@ Cross-platform clipboard synchronization tool with flexible MQTT and HTTP multi-
 - **YAML Configuration**: Unified config file for all parameters, supports remote config download
 - **Multi-protocol**: MQTT (pub/sub) and HTTP (push) protocols
 - **Cross-platform**: Linux (X11/Wayland), macOS, Windows
-- **Native Wayland**: Pure Go, single data-control connection with no Cgo or runtime `libwayland`
+- **Native Linux clipboard**: Pure Go Wayland data-control and X11/XFixes backends with no Cgo runtime dependency
 - **Reliable deduplication**: Raw-content and background pixel-exact image deduplication plus content-bound echo suppression
 - **Asynchronous forwarding**: Isolated serial MQTT/HTTP senders keep slow targets away from capture and other targets
 - **Forward Engine**: Flexible message routing with multi-source/multi-target and automatic deduplication
@@ -24,7 +24,7 @@ Cross-platform clipboard synchronization tool with flexible MQTT and HTTP multi-
 ### Requirements
 
 - Go 1.24+
-- Linux: xclip/xsel for X11; native Wayland has no external dependency and falls back to wl-clipboard when data-control is unavailable
+- Linux: Native X11/XFixes and Wayland data-control need no external commands; the command fallback needs xclip on X11 or wl-clipboard on Wayland
 - macOS: pbcopy/pbpaste, osascript (bundled with macOS)
 - Windows: no extra dependencies
 
@@ -120,15 +120,18 @@ clipboard:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `backend` | `auto`, `native`, or `command`; native applies to Wayland data-control | `auto` |
+| `backend` | `auto`, `native`, or `command`; native supports X11/XFixes and Wayland data-control | `auto` |
 | `dedupWindowMs` | Raw and pixel-exact deduplication window (0–60000 ms) | `5000` |
 | `readTimeoutMs` | Per-selection read timeout (500–60000 ms) | `5000` |
 | `imageReadDelayMs` | Image read delay for capture-path contention (0–2000 ms); text stays immediate | `200` |
 | `maxContentBytes` | Per-selection limit (1 MiB–1 GiB) | `134217728` |
 | `imagePixelDedup` | Compare exact decoded pixels when image encodings differ | `true` |
 
-On Linux Wayland, `auto` prefers `ext_data_control_manager_v1`, then
-`zwlr_data_control_manager_v1`, and falls back to the command backend if native initialization is unavailable.
+On Linux X11, `auto` uses event-driven XFixes selection monitoring and native Selection/INCR transfers.
+On Wayland, it prefers `ext_data_control_manager_v1`, then `zwlr_data_control_manager_v1`, and falls back
+to the command backend if native initialization is unavailable. The X11 command backend only delegates data
+reads and writes to xclip; event observation still uses XFixes and no longer relies on the invalid xsel
+`--watch` mode.
 Runtime disconnects reconnect at 1, 2, 4, 8, 16, 30, then at most 60 seconds.
 Set `CLIPBOARD_BACKEND=command` for an immediate rollback.
 The native backend waits `imageReadDelayMs` before reading an image so screenshot tools and clipboard

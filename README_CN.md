@@ -9,7 +9,7 @@
 - **YAML 配置**: 统一的配置文件管理所有参数，支持远程配置下载
 - **多协议支持**: MQTT（发布/订阅）和 HTTP（推送）协议
 - **跨平台**: Linux（X11/Wayland）、macOS、Windows
-- **原生 Wayland**: 纯 Go data-control 单连接，无 CGO 或 `libwayland` 运行时依赖
+- **原生 Linux 剪贴板**: 纯 Go Wayland data-control 与 X11/XFixes 后端，无 CGO 运行时依赖
 - **可靠去重**: 5 秒原始内容去重、后台图片像素精确去重、内容绑定的回声抑制
 - **异步转发**: MQTT/HTTP 按目标隔离串行发送，慢目标不阻塞剪贴板采集或其他目标
 - **转发规则引擎**: 灵活的消息路由，支持多源多目标、自动去重
@@ -24,7 +24,7 @@
 ### 环境要求
 
 - Go 1.24+
-- Linux: X11 需要 xclip/xsel；Wayland 原生 data-control 无外部依赖，不支持时自动回退到 wl-clipboard
+- Linux: 默认的 X11/XFixes 与 Wayland data-control 原生后端无外部命令依赖；命令回退后端在 X11 需要 xclip、Wayland 需要 wl-clipboard
 - macOS: pbcopy/pbpaste、osascript（系统自带）
 - Windows: 无特殊依赖
 
@@ -120,15 +120,17 @@ clipboard:
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `backend` | `auto`、`native`、`command`；`native` 仅适用于支持 data-control 的 Wayland | `auto` |
+| `backend` | `auto`、`native`、`command`；`native` 支持 X11/XFixes 和 Wayland data-control | `auto` |
 | `dedupWindowMs` | 原始内容和图片像素去重窗口，范围 0～60000ms | `5000` |
 | `readTimeoutMs` | 单次读取超时，范围 500～60000ms | `5000` |
 | `imageReadDelayMs` | 图片读取错峰延迟，范围 0～2000ms；文本不延迟 | `200` |
 | `maxContentBytes` | 单次内容上限，范围 1 MiB～1 GiB | `134217728` |
 | `imagePixelDedup` | 对原始编码不同的图片进行像素精确去重 | `true` |
 
-`auto` 在 Linux Wayland 上优先选择 `ext_data_control_manager_v1`，其次选择
-`zwlr_data_control_manager_v1`；初始化不可用时回退命令后端。运行中的原生连接断开会按
+`auto` 在 Linux X11 上使用事件驱动的 XFixes 选择监听和原生 Selection/INCR 传输；在 Wayland
+上优先选择 `ext_data_control_manager_v1`，其次选择 `zwlr_data_control_manager_v1`；初始化不可用时
+回退命令后端。X11 命令后端仅将数据读写回退到 xclip，事件监听仍使用 XFixes，不再依赖无效的
+xsel `--watch` 方式。运行中的原生连接断开会按
 1、2、4、8、16、30、60 秒退避重连。可临时设置 `CLIPBOARD_BACKEND=command` 一键回滚。
 原生后端会在读取图片前等待 `imageReadDelayMs`，使截图工具和 CopyQ 先完成关键路径；
 同步写入附带来源标记，匹配的本地回声无需传输和解码图片。完整原始内容 SHA-256

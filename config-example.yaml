@@ -9,7 +9,7 @@ device:
 
 # 剪贴板采集、去重与回声抑制
 clipboard:
-  backend: auto                      # auto | native | command；Linux Wayland 默认优先原生
+  backend: auto                      # auto | native | command；Linux X11/Wayland 默认优先原生
   dedupWindowMs: 5000                # 去重窗口，0 仅关闭跨事件去重
   readTimeoutMs: 5000                # 单次读取超时，允许 500～60000
   imageReadDelayMs: 200              # 图片读取错峰延迟，避免与截图工具争用，允许 0～2000

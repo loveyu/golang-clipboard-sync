@@ -74,7 +74,11 @@ jobs:
         if: matrix.clipboard_env == 'x11'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends mosquitto-clients xclip xsel xvfb curl jq python3
+          sudo apt-get install -y -qq --no-install-recommends mosquitto-clients xclip xvfb curl jq python3
+
+      - name: Test native X11 protocol compatibility
+        if: matrix.clipboard_env == 'x11'
+        run: xvfb-run -a env CLIPBOARD_X11_NATIVE_INTEGRATION=1 go test ./internal/x11clipboard -run TestNativeX11Compatibility -count=1 -v
 
       - name: Install Wayland dependencies
         if: matrix.clipboard_env == 'wayland'
