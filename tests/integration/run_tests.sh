@@ -42,11 +42,16 @@ log_skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1"; ((skip++)); }
 log_info() { echo -e "         $1"; }
 
 MQTT_PID=""
+X11_PID=""
+X11_DISPLAY_FILE=""
 
 cleanup() {
     jobs -p 2>/dev/null | xargs kill 2>/dev/null || true
     docker rm -f mosquitto-test 2>/dev/null || true
     [ -n "${MQTT_PID}" ] && kill "${MQTT_PID}" 2>/dev/null || true
+    [ -n "${X11_PID}" ] && kill "${X11_PID}" 2>/dev/null || true
+    [ -n "${X11_PID}" ] && wait "${X11_PID}" 2>/dev/null || true
+    [ -n "${X11_DISPLAY_FILE}" ] && rm -f "${X11_DISPLAY_FILE}" || true
 }
 trap cleanup EXIT
 
@@ -124,6 +129,31 @@ for i in $(seq 1 10); do
     sleep 0.5
 done
 
+# Keep one X server alive for the complete X11 suite. Starting a separate
+# xvfb-run wrapper for every background app makes the wrapper PID, app PID and
+# X server lifetime race during teardown.
+if [ "$CLIPBOARD_ENV" = "x11" ] && command -v Xvfb >/dev/null 2>&1 && command -v xclip >/dev/null 2>&1; then
+    X11_DISPLAY_FILE=$(mktemp)
+    Xvfb -displayfd 1 -screen 0 1280x720x24 -nolisten tcp \
+        > "${X11_DISPLAY_FILE}" 2> "${RESULT_DIR}/xvfb.log" &
+    X11_PID=$!
+    for _ in $(seq 1 20); do
+        [ -s "${X11_DISPLAY_FILE}" ] && break
+        kill -0 "${X11_PID}" 2>/dev/null || break
+        sleep 0.25
+    done
+    X11_DISPLAY_NUMBER=$(tr -d '[:space:]' < "${X11_DISPLAY_FILE}")
+    case "${X11_DISPLAY_NUMBER}" in
+        ''|*[!0-9]*)
+            echo "Failed to start Xvfb"
+            cat "${RESULT_DIR}/xvfb.log" 2>/dev/null || true
+            exit 1
+            ;;
+    esac
+    export DISPLAY=":${X11_DISPLAY_NUMBER}"
+    export XDG_SESSION_TYPE=x11
+fi
+
 echo ""
 echo "=== Running integration tests ==="
 echo ""
@@ -167,19 +197,14 @@ check_clipboard_env() {
     elif [ "$CLIPBOARD_ENV" = "windows" ]; then
         return 0
     else
-        command -v xvfb-run >/dev/null 2>&1 && command -v xclip >/dev/null 2>&1
+        [ -n "${X11_PID}" ] && kill -0 "${X11_PID}" 2>/dev/null && command -v xclip >/dev/null 2>&1
     fi
 }
 
-# Run a command with the appropriate clipboard environment wrapper.
-# Wayland/darwin: runs directly (compositor or native clipboard already available).
-# X11: wraps with xvfb-run to provide a virtual display.
+# The CI job prepares Wayland before invoking this script. X11 uses the shared
+# Xvfb instance started above, so every platform can run the command directly.
 run_with_clipboard() {
-    if [ "$CLIPBOARD_ENV" = "wayland" ] || [ "$CLIPBOARD_ENV" = "darwin" ] || [ "$CLIPBOARD_ENV" = "windows" ]; then
-        "$@"
-    else
-        xvfb-run -a "$@"
-    fi
+    "$@"
 }
 
 # ======================== Tests ========================
