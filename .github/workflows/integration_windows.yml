@@ -24,24 +24,33 @@ jobs:
       - name: Install Mosquitto
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
           $installer = "$env:TEMP\mosquitto-setup.exe"
           $downloaded = $false
           foreach ($version in @("2.0.21", "2.0.20", "2.0.19", "2.0.18")) {
             $url = "https://mosquitto.org/files/binary/win64/mosquitto-$version-install-windows-x64.exe"
             Write-Host "Trying mosquitto $version from $url"
-            curl.exe -L --retry 3 --retry-delay 5 -o $installer $url
-            if ((Test-Path $installer) -and (Get-Item $installer).Length -ge 100000) {
+            Remove-Item $installer -Force -ErrorAction SilentlyContinue
+            curl.exe --fail --location --retry 5 --retry-all-errors --retry-delay 5 `
+              --retry-max-time 300 --connect-timeout 15 --max-time 120 `
+              --output $installer $url
+            $curlExitCode = $LASTEXITCODE
+            if ($curlExitCode -eq 0 -and (Test-Path $installer) -and (Get-Item $installer).Length -ge 5MB) {
               Write-Host "Downloaded mosquitto $version successfully"
               $downloaded = $true
               break
             }
-            Write-Host "Version $version not available, trying next..."
+            Write-Warning "Mosquitto $version download failed or was incomplete (curl exit $curlExitCode); trying next version"
           }
           if (-not $downloaded) {
             Write-Error "Failed to download mosquitto from mosquitto.org"
             exit 1
           }
-          Start-Process -FilePath $installer -ArgumentList "/S" -Wait
+          $install = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          if ($install.ExitCode -notin @(0, 3010)) {
+            Write-Error "Mosquitto installer exited with code $($install.ExitCode)"
+            exit $install.ExitCode
+          }
           Start-Sleep -Seconds 5
           # Stop the auto-started service so our test script can start it with custom config
           Stop-Service -Name "mosquitto" -Force -ErrorAction SilentlyContinue
