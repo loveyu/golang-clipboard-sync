@@ -114,9 +114,7 @@ jobs:
         run: |
           cp config-example.yaml artifacts/config-example.yaml
           cd artifacts
-          echo "## SHA256 Checksums" > checksums.txt
-          echo "" >> checksums.txt
-          sha256sum * >> checksums.txt
+          sha256sum clipboard-sync-* config-example.yaml > checksums.txt
           cat checksums.txt
           ls -lh
 
