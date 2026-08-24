@@ -531,8 +531,25 @@ msg = {'time': time.time(), 'uuid': 'echo-test', 'deviceName': 'remote-device',
 print(json.dumps(msg))
 " | curl -sf -X POST -H "Content-Type: application/json" -d @- "http://localhost:${echo_port}/update-clipboard" >/dev/null
 
-    sleep 1
-    local after_count=$(python3 -c "
+    # Forwarding is asynchronous. Poll for the direct delivery instead of
+    # assuming a loaded CI runner will finish it within one fixed second.
+    local after_count=$before_count
+    for _ in $(seq 1 20); do
+        after_count=$(python3 -c "
+import json, urllib.request
+d = json.loads(urllib.request.urlopen('http://localhost:${CAPTURE_PORT}/_stats').read())
+print(d['count'])
+")
+        if [ "$after_count" -gt "$before_count" ]; then
+            break
+        fi
+        sleep 0.25
+    done
+
+    # Leave enough time for a wrongly unsuppressed clipboard event to arrive,
+    # then assert that the count still increased exactly once.
+    sleep 2
+    after_count=$(python3 -c "
 import json, urllib.request
 d = json.loads(urllib.request.urlopen('http://localhost:${CAPTURE_PORT}/_stats').read())
 print(d['count'])
